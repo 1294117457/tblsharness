@@ -1,0 +1,133 @@
+:root {
+  --hn-bg: var(--vscode-editor-background, #1e1e1e);
+  --hn-fg: var(--vscode-editor-foreground, #cccccc);
+  --hn-muted: var(--vscode-descriptionForeground, #9d9d9d);
+  --hn-border: var(--vscode-panel-border, #3c3c3c);
+  --hn-node-bg: var(--vscode-sideBar-background, #252526);
+  --hn-node-header: var(--vscode-sideBarSectionHeader-background, #2d2d30);
+  --hn-accent: var(--vscode-focusBorder, #3794ff);
+  --hn-button-bg: var(--vscode-button-background, #0e639c);
+  --hn-button-fg: var(--vscode-button-foreground, #ffffff);
+  --hn-button-hover: var(--vscode-button-hoverBackground, #1177bb);
+
+  --hn-design-only: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+  --hn-db-only: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991);
+  --hn-mismatch: var(--vscode-editorWarning-foreground, #cca700);
+  --hn-missing: var(--vscode-editorError-foreground, #f14c4c);
+
+  --hn-design-header: color-mix(in srgb, var(--hn-accent) 22%, var(--hn-node-header));
+  --hn-db-header: color-mix(in srgb, var(--hn-db-only) 18%, var(--hn-node-header));
+  --hn-note-bg: color-mix(in srgb, #e8c547 22%, var(--hn-node-bg));
+  --hn-note-fg: var(--hn-fg);
+  --hn-input-bg: var(--vscode-input-background, #3c3c3c);
+  --hn-input-fg: var(--vscode-input-foreground, #cccccc);
+  --hn-input-border: var(--vscode-input-border, transparent);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--hn-bg);
+  color: var(--hn-fg);
+  font-family: var(--vscode-font-family, system-ui, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+button {
+  font: inherit;
+  color: var(--hn-button-fg);
+  background: var(--hn-button-bg);
+  border: none;
+  border-radius: 2px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--hn-button-hover);
+}
+
+button.secondary {
+  color: var(--hn-fg);
+  background: transparent;
+  border: 1px solid var(--hn-border);
+}
+
+button.secondary:hover {
+  border-color: var(--hn-accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.small {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+button.icon-btn {
+  padding: 0 4px;
+  color: var(--hn-muted);
+  background: transparent;
+  font-size: 11px;
+}
+
+button.icon-btn:hover {
+  color: var(--hn-fg);
+  background: var(--hn-node-header);
+}
+
+input:not([type='checkbox']),
+select,
+textarea {
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border: 1px solid var(--hn-input-border);
+  border-radius: 2px;
+  color: var(--hn-input-fg);
+  background: var(--hn-input-bg);
+  font: inherit;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 1px solid var(--hn-accent);
+  outline-offset: -1px;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.7;
+}
+
+.muted {
+  color: var(--hn-muted);
+}
+
+p {
+  margin: 0;
+}
+
+.vue-flow__edge-text {
+  fill: var(--hn-muted);
+}
+
+.vue-flow__edge-textbg {
+  fill: var(--hn-bg);
+}
+
+.vue-flow__controls-button {
+  background: var(--hn-node-bg);
+  border-color: var(--hn-border);
+  fill: var(--hn-fg);
+}

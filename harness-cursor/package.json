@@ -1,0 +1,525 @@
+{
+  "name": "harness-cursor",
+  "displayName": "Harness",
+  "description": "以 tbls JSON 为统一格式，对照数据模型的设计与数据库的实际结构",
+  "version": "0.0.2",
+  "publisher": "harness",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "harness.workspace.create",
+        "title": "新建工作区",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.workspace.rename",
+        "title": "重命名工作区",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.workspace.delete",
+        "title": "删除工作区",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.workspace.add",
+        "title": "新建…",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.edit",
+        "title": "编辑…",
+        "category": "Harness",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "harness.refresh",
+        "title": "刷新",
+        "category": "Harness",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "harness.openStorage",
+        "title": "打开存储目录",
+        "category": "Harness",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "harness.design.create",
+        "title": "新建设计库",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.design.createBlank",
+        "title": "空白",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.createFromDb",
+        "title": "从数据库复制…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.createFromFile",
+        "title": "从 tbls JSON 文件导入…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.setDriver",
+        "title": "目标数据库类型…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.rename",
+        "title": "重命名",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.openRaw",
+        "title": "打开 schema.json",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.openExt",
+        "title": "打开 ext.json",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.rename",
+        "title": "重命名设计库",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.design.delete",
+        "title": "删除设计库",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.create",
+        "title": "添加数据库",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.db.sync",
+        "title": "同步数据库结构",
+        "category": "Harness",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "harness.db.editConnection",
+        "title": "编辑连接…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.clearConnection",
+        "title": "清除已保存的连接",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.importSnapshot",
+        "title": "导入快照文件…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.importTblsConfig",
+        "title": "导入 tbls 配置（.tbls.yml）…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.openConfig",
+        "title": "编辑配置（source.yml）",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.openSnapshot",
+        "title": "打开最新快照",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.db.delete",
+        "title": "删除数据库",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.canvas.create",
+        "title": "新建画布",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.canvas.open",
+        "title": "打开画布",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.canvas.rename",
+        "title": "重命名画布",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.canvas.delete",
+        "title": "删除画布",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.source.addToCanvas",
+        "title": "添加到画布…",
+        "category": "Harness",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "harness.table.revealInCanvas",
+        "title": "在画布中定位",
+        "category": "Harness",
+        "icon": "$(target)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "harness",
+          "title": "Harness",
+          "icon": "media/harness.svg"
+        }
+      ]
+    },
+    "views": {
+      "harness": [
+        {
+          "id": "harness.workspaces",
+          "name": "工作区"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "harness.workspaces",
+        "contents": "工作区用来组织设计库、数据库结构和画布。不需要连接数据库，也可以直接开始设计。\n[新建工作区](command:harness.workspace.create)\n工作区保存在插件自己的存储目录中，不会写入你的项目。"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "harness.canvas",
+        "displayName": "Harness 画布",
+        "selector": [
+          {
+            "filenamePattern": "*.canvas.json"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "harness.design.newMenu",
+        "label": "新建设计库"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "harness.rename",
+        "key": "f2",
+        "when": "focusedView == harness.workspaces"
+      }
+    ],
+    "menus": {
+      "harness.design.newMenu": [
+        {
+          "command": "harness.design.createBlank",
+          "group": "1_new@1"
+        },
+        {
+          "command": "harness.design.createFromDb",
+          "group": "1_new@2"
+        },
+        {
+          "command": "harness.design.createFromFile",
+          "group": "1_new@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "harness.workspace.create",
+          "when": "view == harness.workspaces",
+          "group": "navigation@1"
+        },
+        {
+          "command": "harness.refresh",
+          "when": "view == harness.workspaces",
+          "group": "navigation@2"
+        },
+        {
+          "command": "harness.openStorage",
+          "when": "view == harness.workspaces",
+          "group": "9_storage"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "harness.edit",
+          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|canvas)$/",
+          "group": "inline@9"
+        },
+        {
+          "command": "harness.edit",
+          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|canvas)$/",
+          "group": "9_manage@0"
+        },
+        {
+          "command": "harness.workspace.add",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "inline"
+        },
+        {
+          "submenu": "harness.design.newMenu",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "1_new@1"
+        },
+        {
+          "command": "harness.db.create",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "1_new@2"
+        },
+        {
+          "command": "harness.canvas.create",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "1_new@3"
+        },
+        {
+          "command": "harness.workspace.rename",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "9_manage@1"
+        },
+        {
+          "command": "harness.workspace.delete",
+          "when": "view == harness.workspaces && viewItem == workspace",
+          "group": "9_manage@2"
+        },
+        {
+          "command": "harness.design.create",
+          "when": "view == harness.workspaces && viewItem == group.design",
+          "group": "inline"
+        },
+        {
+          "submenu": "harness.design.newMenu",
+          "when": "view == harness.workspaces && viewItem == group.design",
+          "group": "1_new@1"
+        },
+        {
+          "command": "harness.db.create",
+          "when": "view == harness.workspaces && viewItem == group.db",
+          "group": "inline"
+        },
+        {
+          "command": "harness.canvas.create",
+          "when": "view == harness.workspaces && viewItem == group.canvas",
+          "group": "inline"
+        },
+        {
+          "command": "harness.source.addToCanvas",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "inline"
+        },
+        {
+          "command": "harness.source.addToCanvas",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "1_open@1"
+        },
+        {
+          "command": "harness.design.openRaw",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "1_open@2"
+        },
+        {
+          "command": "harness.design.openExt",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "1_open@3"
+        },
+        {
+          "command": "harness.design.setDriver",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "harness.design.rename",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "9_manage@1"
+        },
+        {
+          "command": "harness.design.delete",
+          "when": "view == harness.workspaces && viewItem == design",
+          "group": "9_manage@2"
+        },
+        {
+          "command": "harness.db.sync",
+          "when": "view == harness.workspaces && viewItem == db.connected",
+          "group": "inline"
+        },
+        {
+          "command": "harness.db.sync",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "1_sync@1"
+        },
+        {
+          "command": "harness.db.editConnection",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "1_sync@2"
+        },
+        {
+          "command": "harness.db.clearConnection",
+          "when": "view == harness.workspaces && viewItem == db.connected",
+          "group": "1_sync@3"
+        },
+        {
+          "command": "harness.db.importSnapshot",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "2_import@1"
+        },
+        {
+          "command": "harness.db.importTblsConfig",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "2_import@2"
+        },
+        {
+          "command": "harness.source.addToCanvas",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "3_open@1"
+        },
+        {
+          "command": "harness.db.openSnapshot",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "3_open@2"
+        },
+        {
+          "command": "harness.db.openConfig",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "3_open@3"
+        },
+        {
+          "command": "harness.db.delete",
+          "when": "view == harness.workspaces && viewItem =~ /^db\\./",
+          "group": "9_manage@2"
+        },
+        {
+          "command": "harness.canvas.open",
+          "when": "view == harness.workspaces && viewItem == canvas",
+          "group": "1_open@1"
+        },
+        {
+          "command": "harness.canvas.rename",
+          "when": "view == harness.workspaces && viewItem == canvas",
+          "group": "9_manage@1"
+        },
+        {
+          "command": "harness.canvas.delete",
+          "when": "view == harness.workspaces && viewItem == canvas",
+          "group": "9_manage@2"
+        },
+        {
+          "command": "harness.table.revealInCanvas",
+          "when": "view == harness.workspaces && viewItem =~ /^table\\./",
+          "group": "inline"
+        },
+        {
+          "command": "harness.table.revealInCanvas",
+          "when": "view == harness.workspaces && viewItem =~ /^table\\./",
+          "group": "1_open@1"
+        },
+        {
+          "command": "harness.source.addToCanvas",
+          "when": "view == harness.workspaces && viewItem =~ /^table\\./",
+          "group": "1_open@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "harness.source.addToCanvas",
+          "when": "false"
+        },
+        {
+          "command": "harness.table.revealInCanvas",
+          "when": "false"
+        },
+        {
+          "command": "harness.rename",
+          "when": "false"
+        },
+        {
+          "command": "harness.edit",
+          "when": "false"
+        },
+        {
+          "command": "harness.design.createBlank",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Harness",
+      "properties": {
+        "harness.tblsPath": {
+          "type": "string",
+          "default": "tbls",
+          "description": "tbls 可执行文件路径。tbls 在 PATH 里时保持默认值即可。"
+        },
+        "harness.storageDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "工作区的存储目录（绝对路径）。留空时使用插件自己的存储目录。可以改到网盘或 Git 仓库里做备份和同步；连接信息（主机、用户名、密码）始终保存在系统凭据中，不会写入这个目录。"
+        },
+        "harness.tblsTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "description": "读取数据库结构（tbls）的最长时间，超过后停止。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build:ext": "node esbuild.mjs",
+    "build:webview": "vite build --config webview-ui/vite.config.mts",
+    "build": "npm run build:ext && npm run build:webview",
+    "watch:ext": "node esbuild.mjs --watch",
+    "watch:webview": "vite build --config webview-ui/vite.config.mts --watch",
+    "dev:webview": "vite --config webview-ui/vite.config.mts",
+    "typecheck": "tsc --noEmit -p . && vue-tsc --noEmit -p webview-ui",
+    "test": "vitest run",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "elkjs": "^0.12.0",
+    "vue": "^3.5.43",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "@types/vscode": "^1.90.0",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2",
+    "vue-tsc": "^3.3.11"
+  }
+}

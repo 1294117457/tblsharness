@@ -1,0 +1,52 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "npm",
+      "script": "build",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "watch:ext",
+      "type": "npm",
+      "script": "watch:ext",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "esbuild",
+        "pattern": { "regexp": "^✘ \\[ERROR\\] (.*) \\((.*):(\\d+):(\\d+)\\)$", "message": 1, "file": 2, "line": 3, "column": 4 },
+        "background": {
+          "activeBeginsPattern": "\\[watch\\] build started",
+          "activeEndsPattern": "\\[watch\\] build finished"
+        }
+      }
+    },
+    {
+      "label": "dev:webview",
+      "type": "npm",
+      "script": "dev:webview",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "vite",
+        "pattern": { "regexp": "^__never_matches__$" },
+        "background": {
+          "activeBeginsPattern": "VITE v",
+          "activeEndsPattern": "Local:"
+        }
+      }
+    },
+    {
+      "label": "watch:webview",
+      "type": "npm",
+      "script": "watch:webview",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "dev",
+      "dependsOn": ["watch:ext", "dev:webview"],
+      "problemMatcher": []
+    }
+  ]
+}

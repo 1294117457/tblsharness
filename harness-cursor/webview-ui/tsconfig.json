@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "jsx": "preserve",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["../src/shared/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "../src/shared/**/*.ts", "../src/model/normalize.ts", "../src/model/types.ts", "../src/diff/diff.ts"]
+}

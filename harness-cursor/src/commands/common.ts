@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
 import type { CanvasEditorProvider } from '../canvas/canvasEditor';
 import type { ConnectionPanels } from '../connection/connectionPanel';
+import type { DiagramService } from '../diagram/diagramService';
 import type { EditPanels } from '../edit/editPanel';
 import type { ModelStore } from '../model/store';
 import { parseCanvas } from '../shared/canvas';
 import type { SourceKind } from '../shared/workspace';
 import type { TreeNode, WorkspaceTreeProvider } from '../views/workspaceTree';
 import { readText } from '../workspace/fsUtil';
-import type { HarnessStorage, HarnessWorkspace } from '../workspace/storage';
+import type { Design, HarnessStorage, HarnessWorkspace } from '../workspace/storage';
 
 export interface Harness {
   context: vscode.ExtensionContext;
@@ -18,6 +19,7 @@ export interface Harness {
   canvases: CanvasEditorProvider;
   connections: ConnectionPanels;
   editors: EditPanels;
+  diagrams: DiagramService;
 }
 
 /** Selects a freshly created node; waits for the debounced tree refresh first so the node exists. */
@@ -38,10 +40,11 @@ export async function designNames(ws: HarnessWorkspace): Promise<string[]> {
   return Promise.all((await ws.designIds()).map(async (id) => (await ws.design(id).readMeta()).name));
 }
 
-export async function canvasNames(h: Harness, ws: HarnessWorkspace): Promise<string[]> {
+/** Canvas names inside a single design. */
+export async function canvasNames(h: Harness, design: Design): Promise<string[]> {
   return Promise.all(
-    (await ws.canvasIds()).map(async (id) => {
-      const uri = ws.canvasUri(id);
+    (await design.canvasIds()).map(async (id) => {
+      const uri = design.canvasUri(id);
       const open = h.canvases.openDocument(uri);
       if (open) return open.state.name;
       try {
@@ -58,6 +61,8 @@ export interface NodeArg {
   workspace?: string;
   id?: string;
   kind?: string;
+  /** For canvas/diagram nodes: the design they belong to. */
+  design?: string;
   source?: SourceKind;
   table?: { key: string };
 }
@@ -97,12 +102,14 @@ export async function pickWorkspace(h: Harness, arg?: NodeArg): Promise<HarnessW
 }
 
 export async function pickSourceId(h: Harness, ws: HarnessWorkspace, kind: SourceKind, arg?: NodeArg): Promise<string> {
-  if (arg?.id && (arg.kind === kind || arg.kind === undefined || arg.kind === 'table')) return arg.id;
+  const designChild = kind === 'design' && (arg?.kind === 'designTables' || arg?.kind === 'diagramGroup' || arg?.kind === 'canvas');
+  if (arg?.id && (arg.kind === kind || arg.kind === undefined || arg.kind === 'table' || designChild)) return arg.id;
+  if (kind === 'design' && arg?.design) return arg.design;
   const ids = kind === 'design' ? await ws.designIds() : await ws.dbIds();
-  if (!ids.length) throw new Error(kind === 'design' ? '这个工作区还没有设计库' : '这个工作区还没有数据库');
+  if (!ids.length) throw new Error(kind === 'design' ? '这个工作区还没有设计画布' : '这个工作区还没有数据库');
   if (ids.length === 1) return ids[0];
   const items = await Promise.all(ids.map(async (id) => ({ label: await sourceName(h, ws, kind, id), description: id, id })));
-  return required(await vscode.window.showQuickPick(items, { title: kind === 'design' ? '选择设计库' : '选择数据库' })).id;
+  return required(await vscode.window.showQuickPick(items, { title: kind === 'design' ? '选择设计画布' : '选择数据库' })).id;
 }
 
 /** Display name; for a db source that is `host:port/db`, derived from its connection. */

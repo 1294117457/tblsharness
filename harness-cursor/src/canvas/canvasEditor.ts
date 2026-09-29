@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
+import type { DiagramRef, DiagramService } from '../diagram/diagramService';
 import type { ModelStore, StoreChange } from '../model/store';
+import { SyncError } from '../shared/sync';
 import {
   applyCanvasEdit,
+  DESIGN_SOURCE,
   parseCanvas,
   renameTableInCanvas,
   serializeCanvas,
@@ -9,8 +12,9 @@ import {
   type CanvasFile,
   type Viewport,
 } from '../shared/canvas';
+import { copyTableOps, type ConflictStrategy } from '../shared/copyTables';
 import { applyDesignOps, DesignOpError, serializeDesign, type DesignOp } from '../shared/designOps';
-import type { HostMessage, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
+import type { ComparisonData, DesignContext, HostMessage, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
 import { renameDesignTable, type OpenCanvasRegistry } from '../workspace/refactor';
 import { readText, writeText } from '../workspace/fsUtil';
 import type { HarnessStorage } from '../workspace/storage';
@@ -20,7 +24,6 @@ export const CANVAS_VIEW_TYPE = 'harness.canvas';
 
 export class CanvasDocument implements vscode.CustomDocument {
   private readonly contentEmitter = new vscode.EventEmitter<{ echo: boolean }>();
-  /** Fired when `state` changes for any reason other than an edit the webview already applied itself. */
   readonly onDidChangeContent = this.contentEmitter.event;
   viewport: Viewport | undefined;
   private version = 0;
@@ -30,6 +33,8 @@ export class CanvasDocument implements vscode.CustomDocument {
     readonly uri: vscode.Uri,
     public state: CanvasFile,
     readonly workspaceId: string | undefined,
+    readonly designId: string | undefined,
+    readonly canvasId: string | undefined,
   ) {
     this.viewport = state.viewport;
   }
@@ -66,19 +71,24 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
   private readonly documents = new Map<string, CanvasDocument>();
   private readonly sessions = new Map<string, CanvasSession>();
   private readonly nameEmitter = new vscode.EventEmitter<void>();
-  /** A canvas name changed in an open editor (edit, undo, revert) or an editor closed. */
   readonly onDidChangeOpenName = this.nameEmitter.event;
 
   constructor(
     readonly context: vscode.ExtensionContext,
     readonly storage: HarnessStorage,
     readonly store: ModelStore,
+    readonly diagrams: DiagramService,
   ) {
-    context.subscriptions.push(store.onDidChange((change) => this.onStoreChange(change)));
+    context.subscriptions.push(
+      store.onDidChange((change) => this.onStoreChange(change)),
+      diagrams.onDidChange((ref) => {
+        for (const session of this.sessions.values()) session.onDiagramChange(ref);
+      }),
+    );
   }
 
-  static register(context: vscode.ExtensionContext, storage: HarnessStorage, store: ModelStore): CanvasEditorProvider {
-    const provider = new CanvasEditorProvider(context, storage, store);
+  static register(context: vscode.ExtensionContext, storage: HarnessStorage, store: ModelStore, diagrams: DiagramService): CanvasEditorProvider {
+    const provider = new CanvasEditorProvider(context, storage, store, diagrams);
     context.subscriptions.push(
       vscode.window.registerCustomEditorProvider(CANVAS_VIEW_TYPE, provider, {
         supportsMultipleEditorsPerDocument: false,
@@ -97,7 +107,15 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
       text = '';
     }
     const located = this.storage.locate(uri);
-    const doc = new CanvasDocument(uri, parseCanvas(text), located?.kind === 'canvas' ? located.workspace : undefined);
+    let workspaceId: string | undefined;
+    let designId: string | undefined;
+    let canvasId: string | undefined;
+    if (located?.kind === 'canvas' && located.design) {
+      workspaceId = located.workspace;
+      designId = located.design;
+      canvasId = located.id;
+    }
+    const doc = new CanvasDocument(uri, parseCanvas(text), workspaceId, designId, canvasId);
     this.documents.set(uri.toString(), doc);
     let name = doc.state.name;
     doc.onDidChangeContent(() => {
@@ -124,6 +142,13 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     this.store.noteOwnWrite(document.uri, text);
     await writeText(document.uri, text);
     document.markSaved();
+    if (document.workspaceId && document.designId && document.canvasId) {
+      const design = this.storage.workspace(document.workspaceId).design(document.designId);
+      const meta = await design.readMeta();
+      if (meta.lastCanvas !== document.canvasId) {
+        await design.writeMeta({ ...meta, lastCanvas: document.canvasId });
+      }
+    }
   }
 
   async saveCustomDocumentAs(document: CanvasDocument, destination: vscode.Uri): Promise<void> {
@@ -161,7 +186,6 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     });
   }
 
-  /** An undoable canvas edit initiated by a command rather than the webview. */
   applyHostEdit(document: CanvasDocument, label: string, edit: CanvasEdit): void {
     const before = document.state;
     const after = applyCanvasEdit(before, edit);
@@ -181,12 +205,10 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     if (!doc) return false;
     const next = transform(doc.state);
     if (next !== doc.state) doc.setState(next, true);
-    // Clean documents are also rewritten on disk by the caller; dirty ones keep their changes until saved.
     return doc.isDirty;
   }
 
-  /** Opens the canvas (if needed) and selects the table. */
-  async reveal(uri: vscode.Uri, focus?: { alias: string; table: string; column?: string }): Promise<void> {
+  async reveal(uri: vscode.Uri, focus?: { source: string; table: string; column?: string }): Promise<void> {
     await vscode.commands.executeCommand('vscode.openWith', uri, CANVAS_VIEW_TYPE);
     if (focus) this.sessions.get(uri.toString())?.focus(focus);
   }
@@ -195,9 +217,14 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     return this.documents.get(uri.toString());
   }
 
+  /** Find all open documents belonging to a specific design. */
+  documentsForDesign(workspaceId: string, designId: string): CanvasDocument[] {
+    return [...this.documents.values()].filter((d) => d.workspaceId === workspaceId && d.designId === designId);
+  }
+
   private onStoreChange(change: StoreChange): void {
-    if (change.kind === 'canvas' && change.workspace && change.id) {
-      const uri = this.storage.workspace(change.workspace).canvasUri(change.id);
+    if (change.kind === 'canvas' && change.workspace && change.id && change.design) {
+      const uri = this.storage.workspace(change.workspace).design(change.design).canvasUri(change.id);
       const doc = this.documents.get(uri.toString());
       if (doc && !doc.isDirty) void this.revertCustomDocument(doc).catch(() => undefined);
     }
@@ -208,8 +235,7 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
 class CanvasSession implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private ready = false;
-  private pendingFocus: { alias: string; table: string; column?: string } | undefined;
-  /** What the webview currently has, so we only resend what changed. */
+  private pendingFocus: { source: string; table: string; column?: string } | undefined;
   private sentSources = new Map<string, string>();
   private sentComparison = '';
 
@@ -235,22 +261,59 @@ class CanvasSession implements vscode.Disposable {
     return this.document.workspaceId;
   }
 
-  focus(target: { alias: string; table: string; column?: string }): void {
+  private get designId(): string | undefined {
+    return this.document.designId;
+  }
+
+  focus(target: { source: string; table: string; column?: string }): void {
     if (this.ready) this.post({ type: 'focus', ...target });
     else this.pendingFocus = target;
+  }
+
+  onDiagramChange(ref: DiagramRef): void {
+    if (ref.workspace !== this.workspaceId || ref.design !== this.designId) return;
+    this.schedulePending();
+  }
+
+  private pendingTimer: NodeJS.Timeout | undefined;
+  private sentPending = '';
+
+  private schedulePending(): void {
+    clearTimeout(this.pendingTimer);
+    this.pendingTimer = setTimeout(() => void this.pushPending(), 300);
+  }
+
+  private async pushPending(): Promise<void> {
+    if (!this.ready || !this.workspaceId || !this.designId) return;
+    const groups = await this.provider.diagrams.pending(this.workspaceId, this.designId);
+    const signature = JSON.stringify(groups);
+    if (signature === this.sentPending) return;
+    this.sentPending = signature;
+    this.post({ type: 'pendingSync', groups });
   }
 
   onStoreChange(change: StoreChange): void {
     if (!this.ready || !this.workspaceId || (change.workspace && change.workspace !== this.workspaceId)) return;
     if (change.kind === 'canvas') return;
-    if (change.kind === 'design' || change.kind === 'db' || change.kind === 'workspace' || change.kind === undefined) {
-      void this.pushCatalog();
-      const affected = this.document.state.sources.filter(
-        (s) => change.kind === 'workspace' || change.kind === undefined || (s.kind === change.kind && s.ref === change.id),
-      );
-      for (const s of affected) this.sentSources.delete(s.alias);
-      void this.pushSources().then(() => this.pushComparison(affected.length > 0));
+    if (change.kind === 'diagram') {
+      if (change.design === this.designId) this.schedulePending();
       return;
+    }
+    if (change.kind === 'design' && change.id === this.designId) {
+      this.schedulePending();
+      this.sentSources.delete(DESIGN_SOURCE);
+      void this.pushSources().then(() => this.pushComparison(true));
+      void this.pushDesignContext();
+      return;
+    }
+    if (change.kind === 'db' || change.kind === 'workspace' || change.kind === undefined) {
+      void this.pushCatalog();
+      if (change.kind === 'db' && change.id) {
+        this.sentSources.delete(change.id);
+      } else {
+        this.sentSources.clear();
+      }
+      void this.pushSources().then(() => this.pushComparison(true));
     }
     if (change.kind === 'comparisons') void this.pushComparison(true);
   }
@@ -269,65 +332,124 @@ class CanvasSession implements vscode.Disposable {
             this.post({ type: 'focus', ...this.pendingFocus });
             this.pendingFocus = undefined;
           }
+          this.sentPending = '';
+          await this.pushPending();
+          return;
+        case 'sync/apply': {
+          const ref: DiagramRef = { workspace: this.workspaceId ?? '', design: this.designId ?? '', diagram: msg.diagram };
+          return await this.applySync(msg.requestId, ref, msg.ids, msg.choices);
+        }
+        case 'sync/ignore': {
+          const ref: DiagramRef = { workspace: this.workspaceId ?? '', design: this.designId ?? '', diagram: msg.diagram };
+          await this.provider.diagrams.ignore(ref, msg.ids, msg.clear);
+          this.post({ type: 'reply', requestId: msg.requestId, ok: true });
+          this.schedulePending();
+          return;
+        }
+        case 'diagram/open':
+          await vscode.commands.executeCommand('harness.diagram.open', {
+            kind: 'diagram',
+            workspace: this.workspaceId,
+            design: this.designId,
+            id: msg.diagram,
+          });
+          return;
+        case 'diagram/create':
+          await vscode.commands.executeCommand('harness.diagram.create', {
+            kind: 'design',
+            workspace: this.workspaceId,
+            id: this.designId,
+            type: 'er',
+            blank: true,
+          });
           return;
         case 'canvas/edit':
           return this.applyCanvasEdit(msg.label, msg.edit);
         case 'design/op':
-          return await this.applyDesignOps(msg.requestId, msg.alias, msg.ops, msg.label, msg.canvasEdit);
+          await this.applyDesignOps(msg.requestId, msg.ops, msg.label, msg.canvasEdit);
+          return;
         case 'diff/accept':
           return await this.acceptDiff(msg.requestId, msg.id, msg.accepted);
         case 'viewport':
           this.document.viewport = msg.viewport;
           return;
-        case 'db/sync': {
-          const s = this.sourceByAlias(msg.alias);
-          if (s?.kind === 'db') await vscode.commands.executeCommand('harness.db.sync', { workspace: this.workspaceId, id: s.ref });
+        case 'db/sync':
+          if (msg.source !== DESIGN_SOURCE) {
+            await vscode.commands.executeCommand('harness.db.sync', { workspace: this.workspaceId, id: msg.source });
+          }
           return;
-        }
         case 'openRaw':
-          return await this.openRaw(msg.alias);
-        case 'source/create':
-          await vscode.commands.executeCommand(msg.kind === 'design' ? 'harness.design.create' : 'harness.db.create', {
-            workspace: this.workspaceId,
-          });
+          return await this.openRaw(msg.source);
+        case 'source/add':
+          return await this.addDbSource(msg.requestId, msg.dbId);
+        case 'source/remove':
+          return await this.removeDbSource(msg.requestId, msg.dbId);
+        case 'design/rename':
+          return await this.renameDesign(msg.requestId, msg.name);
+        case 'canvas/switch':
+          if (this.workspaceId && this.designId) {
+            const uri = this.provider.storage.workspace(this.workspaceId).design(this.designId).canvasUri(msg.canvasId);
+            await vscode.commands.executeCommand('vscode.openWith', uri, CANVAS_VIEW_TYPE);
+          }
           return;
-        case 'source/rename':
-          return await this.renameSource(msg.alias, msg.name);
+        case 'canvas/new':
+          if (this.workspaceId && this.designId) {
+            await vscode.commands.executeCommand('harness.canvas.create', { workspace: this.workspaceId, design: this.designId });
+          }
+          return;
+        case 'canvas/copy':
+          // TODO: implement canvas copy
+          return;
+        case 'table/copyToDesign':
+          return await this.copyTablesToDesign(msg.requestId, msg.source, msg.tables);
       }
     } catch (err) {
       vscode.window.showErrorMessage(`Harness：${(err as Error).message}`);
     }
   }
 
-  private sourceByAlias(alias: string) {
-    return this.document.state.sources.find((s) => s.alias === alias);
-  }
-
   private async sendInit(): Promise<void> {
     this.sentSources.clear();
     this.sentComparison = '';
-    if (!this.workspaceId) {
-      this.post({ type: 'init', canvas: this.document.state, sources: [], error: '这个画布文件不在 Harness 的工作区目录中，无法读取数据源。' });
+    if (!this.workspaceId || !this.designId) {
+      this.post({
+        type: 'init',
+        canvas: this.document.state,
+        design: { workspace: '', design: '', name: '?', canvases: [] },
+        sources: [],
+        error: '这个画布文件不在 Harness 的设计画布目录中，无法读取数据源。',
+      });
       return;
     }
-    const sources = await Promise.all(this.document.state.sources.map((s) => this.loadSource(s)));
-    for (const s of sources) this.sentSources.set(s.alias, sourceSignature(this.sourceByAlias(s.alias)));
+    const sources = await this.loadAllSources();
+    for (const s of sources) this.sentSources.set(s.source, sourceSignature(s.source));
     const comparison = await this.computeComparison();
     this.sentComparison = comparisonSignature(this.document.state);
-    this.post({ type: 'init', canvas: this.document.state, sources, catalog: await this.catalog(), comparison });
+    const designCtx = await this.buildDesignContext();
+    this.post({ type: 'init', canvas: this.document.state, design: designCtx, sources, catalog: await this.catalog(), comparison });
   }
 
-  private async loadSource(s: CanvasFile['sources'][number]): Promise<SourceData> {
-    const loaded = await this.store.source(this.workspaceId!, s.kind, s.ref, s.kind === 'db' ? s.snapshot : undefined);
-    return { alias: s.alias, kind: s.kind, ref: s.ref, name: loaded.name, schema: loaded.schema, snapshot: loaded.snapshot, error: loaded.error };
+  private async loadAllSources(): Promise<SourceData[]> {
+    if (!this.workspaceId || !this.designId) return [];
+    const result: SourceData[] = [];
+    const designData = await this.store.source(this.workspaceId, 'design', this.designId);
+    result.push({ source: DESIGN_SOURCE, name: designData.name, schema: designData.schema, error: designData.error });
+    const meta = await this.provider.storage.workspace(this.workspaceId).design(this.designId).readMeta();
+    for (const dbId of meta.sources ?? []) {
+      const dbData = await this.store.source(this.workspaceId, 'db', dbId);
+      result.push({ source: dbId, name: dbData.name, schema: dbData.schema, snapshot: dbData.snapshot, error: dbData.error });
+    }
+    return result;
   }
 
   private async pushSources(): Promise<void> {
-    for (const s of this.document.state.sources) {
-      const signature = sourceSignature(s);
-      if (this.sentSources.get(s.alias) === signature) continue;
-      this.sentSources.set(s.alias, signature);
-      this.post({ type: 'source', source: await this.loadSource(s) });
+    if (!this.workspaceId || !this.designId) return;
+    const sources = await this.loadAllSources();
+    for (const s of sources) {
+      const sig = sourceSignature(s.source);
+      if (this.sentSources.get(s.source) === sig) continue;
+      this.sentSources.set(s.source, sig);
+      this.post({ type: 'source', source: s });
     }
   }
 
@@ -343,13 +465,34 @@ class CanvasSession implements vscode.Disposable {
     if (catalog) this.post({ type: 'catalog', catalog });
   }
 
-  private async computeComparison() {
+  private async pushDesignContext(): Promise<void> {
+    if (!this.workspaceId || !this.designId) return;
+    this.post({ type: 'design', design: await this.buildDesignContext() });
+  }
+
+  private async buildDesignContext(): Promise<DesignContext> {
+    if (!this.workspaceId || !this.designId) return { workspace: '', design: '', name: '?', canvases: [] };
+    const ws = this.provider.storage.workspace(this.workspaceId);
+    const design = ws.design(this.designId);
+    const meta = await design.readMeta();
+    const canvasIds = await design.canvasIds();
+    const canvases: { id: string; name: string }[] = [];
+    for (const cid of canvasIds) {
+      try {
+        const c = parseCanvas(await readText(design.canvasUri(cid)));
+        canvases.push({ id: cid, name: c.name });
+      } catch {
+        canvases.push({ id: cid, name: cid });
+      }
+    }
+    const designSchema = await this.store.source(this.workspaceId, 'design', this.designId);
+    return { workspace: this.workspaceId, design: this.designId, name: meta.name, driver: designSchema.schema?.driver?.name, canvases };
+  }
+
+  private async computeComparison(): Promise<ComparisonData | undefined> {
     const c = this.document.state.comparison;
-    if (!c || !this.workspaceId) return undefined;
-    const design = this.sourceByAlias(c.design);
-    const db = this.sourceByAlias(c.db);
-    if (design?.kind !== 'design' || db?.kind !== 'db') return undefined;
-    return this.store.comparison(this.workspaceId, design.ref, db.ref, db.snapshot);
+    if (!c || !this.workspaceId || !this.designId) return undefined;
+    return this.store.comparison(this.workspaceId, this.designId, c.db);
   }
 
   private async catalog(): Promise<WorkspaceCatalog | undefined> {
@@ -359,11 +502,9 @@ class CanvasSession implements vscode.Disposable {
   private async afterCanvasChange(echo: boolean): Promise<void> {
     if (!this.ready) return;
     if (echo) this.post({ type: 'canvas', canvas: this.document.state });
-    for (const alias of [...this.sentSources.keys()]) {
-      if (!this.sourceByAlias(alias)) this.sentSources.delete(alias);
-    }
     await this.pushSources();
     await this.pushComparison(false);
+    this.schedulePending();
   }
 
   private applyCanvasEdit(label: string, edit: CanvasEdit): void {
@@ -379,20 +520,43 @@ class CanvasSession implements vscode.Disposable {
     );
   }
 
+  private async applySync(requestId: string, ref: DiagramRef, ids: string[], choices: Record<string, string>): Promise<void> {
+    if (!this.workspaceId || !this.designId) {
+      this.post({ type: 'reply', requestId, ok: false, error: '画布没有关联到设计画布' });
+      return;
+    }
+    const diagrams = this.provider.diagrams;
+    let prepared;
+    try {
+      diagrams.assertNotDirty(ref.workspace, ref.design);
+      prepared = await diagrams.prepare(ref, { ids, choices });
+      const meta = await this.provider.storage.workspace(ref.workspace).design(ref.design).readMeta();
+      if (!(await diagrams.confirmDeletes(prepared.ops, meta.name))) throw new SyncError('已取消');
+    } catch (err) {
+      this.post({ type: 'reply', requestId, ok: false, error: (err as Error).message });
+      return;
+    }
+    if (await this.applyDesignOps(requestId, prepared.ops, prepared.label, undefined, true)) {
+      await diagrams.setRefs(ref, prepared.refs).catch(() => undefined);
+    }
+  }
+
   private async applyDesignOps(
     requestId: string,
-    alias: string,
     ops: DesignOp[],
     label: string,
     canvasEdit: CanvasEdit | undefined,
-  ): Promise<void> {
-    const reply = (error?: string) => this.post({ type: 'reply', requestId, ok: !error, error });
-    const source = this.sourceByAlias(alias);
+    confirmed = false,
+  ): Promise<boolean> {
+    const reply = (error?: string) => {
+      this.post({ type: 'reply', requestId, ok: !error, error });
+      return !error;
+    };
     const workspaceId = this.workspaceId;
-    if (!source || source.kind !== 'design' || !workspaceId) {
-      return reply('只能编辑设计数据源中的表');
-    }
-    const design = this.provider.storage.workspace(workspaceId).design(source.ref);
+    const designId = this.designId;
+    if (!workspaceId || !designId) return reply('画布没有关联到设计画布');
+
+    const design = this.provider.storage.workspace(workspaceId).design(designId);
     const dirty = vscode.workspace.textDocuments.find(
       (d) => d.isDirty && (d.uri.toString() === design.schemaFile.toString() || d.uri.toString() === design.extFile.toString()),
     );
@@ -401,11 +565,12 @@ class CanvasSession implements vscode.Disposable {
     }
 
     const deletes = ops.filter((o): o is Extract<DesignOp, { op: 'table.delete' }> => o.op === 'table.delete');
-    if (deletes.length) {
+    if (deletes.length && !confirmed) {
+      const meta = await design.readMeta();
       const names = deletes.map((d) => d.table).join('、');
       const ok = await vscode.window.showWarningMessage(
-        `确定从设计库“${(await design.readMeta()).name}”中删除表 ${names} 吗？`,
-        { modal: true, detail: '涉及这些表的关系也会一起删除。其他画布中的这些表会显示为“缺失”。可以用撤销恢复。' },
+        `确定从设计画布"${meta.name}"中删除表 ${names} 吗？`,
+        { modal: true, detail: '涉及这些表的关系也会一起删除。可以用撤销恢复。' },
         '删除',
       );
       if (!ok) return reply('已取消');
@@ -414,7 +579,7 @@ class CanvasSession implements vscode.Disposable {
     let before;
     let after;
     try {
-      before = await this.store.designDoc(workspaceId, source.ref);
+      before = await this.store.designDoc(workspaceId, designId);
       after = applyDesignOps(before, ops);
     } catch (err) {
       return reply(err instanceof DesignOpError ? err.message : `执行失败：${(err as Error).message}`);
@@ -422,7 +587,7 @@ class CanvasSession implements vscode.Disposable {
     const renames = ops.filter((o): o is Extract<DesignOp, { op: 'table.rename' }> => o.op === 'table.rename');
     const canvasBefore = this.document.state;
     let canvasAfter = canvasBefore;
-    for (const r of renames) canvasAfter = renameTableInCanvas(canvasAfter, 'design', source.ref, r.from, r.to);
+    for (const r of renames) canvasAfter = renameTableInCanvas(canvasAfter, r.from, r.to);
     if (canvasEdit) canvasAfter = applyCanvasEdit(canvasAfter, canvasEdit);
 
     const storage = this.provider.storage;
@@ -432,23 +597,23 @@ class CanvasSession implements vscode.Disposable {
     const beforeText = serializeDesign(before).schema + serializeDesign(before).ext;
 
     const apply = async (doc: typeof before, canvas: CanvasFile, forward: boolean) => {
-      await this.store.writeDesignDoc(workspaceId, source.ref, doc);
+      await this.store.writeDesignDoc(workspaceId, designId, doc);
       for (const r of forward ? renames : [...renames].reverse()) {
-        await renameDesignTable(storage, registry, workspaceId, source.ref, forward ? r.from : r.to, forward ? r.to : r.from);
+        await renameDesignTable(storage.workspace(workspaceId).design(designId), registry, forward ? r.from : r.to, forward ? r.to : r.from);
       }
       this.document.setState(canvas, true);
     };
     const guard = async (expected: string, run: () => Promise<void>) => {
-      const current = serializeDesign(await this.store.designDoc(workspaceId, source.ref));
+      const current = serializeDesign(await this.store.designDoc(workspaceId, designId));
       if (current.schema + current.ext !== expected) {
-        vscode.window.showWarningMessage(`Harness：设计库在这次修改之后又被改动过，无法撤销或重做“${label}”。`);
+        vscode.window.showWarningMessage(`Harness：设计画布在这次修改之后又被改动过，无法撤销或重做"${label}"。`);
         return;
       }
       await run();
     };
 
-    await this.store.writeDesignDoc(workspaceId, source.ref, after);
-    for (const r of renames) await renameDesignTable(storage, registry, workspaceId, source.ref, r.from, r.to);
+    await this.store.writeDesignDoc(workspaceId, designId, after);
+    for (const r of renames) await renameDesignTable(storage.workspace(workspaceId).design(designId), registry, r.from, r.to);
     if (canvasAfter !== canvasBefore) this.document.setState(canvasAfter, true);
     this.provider.recordEdit(
       this.document,
@@ -456,86 +621,161 @@ class CanvasSession implements vscode.Disposable {
       () => guard(afterText, () => apply(before, canvasBefore, false)),
       () => guard(beforeText, () => apply(after, canvasAfter, true)),
     );
-    reply();
+    return reply();
   }
 
   private async acceptDiff(requestId: string, id: string, accepted: boolean): Promise<void> {
     const c = this.document.state.comparison;
-    const design = c && this.sourceByAlias(c.design);
-    const db = c && this.sourceByAlias(c.db);
-    if (!this.workspaceId || !design || !db) {
+    if (!this.workspaceId || !this.designId || !c) {
       this.post({ type: 'reply', requestId, ok: false, error: '画布没有开启对比' });
       return;
     }
-    const ws = this.provider.storage.workspace(this.workspaceId);
-    await ws.updatePair(design.ref, db.ref, (p) => {
-      const set = new Set(p.acceptedDiffs);
-      if (accepted) set.add(id);
-      else set.delete(id);
-      return { ...p, acceptedDiffs: [...set].sort() };
-    });
+    const design = this.provider.storage.workspace(this.workspaceId).design(this.designId);
+    const entry = await design.comparisonEntry(c.db);
+    const set = new Set(entry.acceptedDiffs ?? []);
+    if (accepted) set.add(id);
+    else set.delete(id);
+    await design.writeComparisonEntry(c.db, { ...entry, acceptedDiffs: [...set].sort() });
     this.store.invalidate({ workspace: this.workspaceId, kind: 'comparisons' });
     this.post({ type: 'reply', requestId, ok: true });
   }
 
-  /** Renames the design source itself (its source.yml), not just its label on this canvas. Db names come from the connection. */
-  private async renameSource(alias: string, name: string): Promise<void> {
-    const s = this.sourceByAlias(alias);
+  private async renameDesign(requestId: string, name: string): Promise<void> {
     const trimmed = name.trim();
-    if (s?.kind !== 'design' || !this.workspaceId || !trimmed) return;
-    const source = this.provider.storage.workspace(this.workspaceId).design(s.ref);
-    const meta = await source.readMeta();
+    if (!this.workspaceId || !this.designId || !trimmed) return;
+    const design = this.provider.storage.workspace(this.workspaceId).design(this.designId);
+    const meta = await design.readMeta();
     if (meta.name === trimmed) return;
-    await source.writeMeta({ ...meta, name: trimmed });
-    this.store.invalidate({ workspace: this.workspaceId, kind: 'design', id: s.ref });
+    await design.writeMeta({ ...meta, name: trimmed });
+    this.store.invalidate({ workspace: this.workspaceId, kind: 'design', id: this.designId });
+    this.post({ type: 'reply', requestId, ok: true });
   }
 
-  private async openRaw(alias: string): Promise<void> {
-    const s = this.sourceByAlias(alias);
-    if (!s || !this.workspaceId) return;
+  private async addDbSource(requestId: string, dbId: string): Promise<void> {
+    if (!this.workspaceId || !this.designId) return;
+    const design = this.provider.storage.workspace(this.workspaceId).design(this.designId);
+    const meta = await design.readMeta();
+    const sources = new Set(meta.sources ?? []);
+    if (sources.has(dbId)) {
+      this.post({ type: 'reply', requestId, ok: true });
+      return;
+    }
+    sources.add(dbId);
+    await design.writeMeta({ ...meta, sources: [...sources] });
+    this.store.invalidate({ workspace: this.workspaceId, kind: 'design', id: this.designId });
+    this.sentSources.delete(dbId);
+    await this.pushSources();
+    this.post({ type: 'reply', requestId, ok: true });
+  }
+
+  private async removeDbSource(requestId: string, dbId: string): Promise<void> {
+    if (!this.workspaceId || !this.designId) return;
+    const design = this.provider.storage.workspace(this.workspaceId).design(this.designId);
+    const meta = await design.readMeta();
+    const sources = (meta.sources ?? []).filter((s) => s !== dbId);
+    await design.writeMeta({ ...meta, sources });
+    this.store.invalidate({ workspace: this.workspaceId, kind: 'design', id: this.designId });
+    this.sentSources.delete(dbId);
+    this.post({ type: 'reply', requestId, ok: true });
+  }
+
+  private async copyTablesToDesign(requestId: string, source: string, tables: string[]): Promise<void> {
+    if (!this.workspaceId || !this.designId) {
+      this.post({ type: 'reply', requestId, ok: false, error: '画布没有关联到设计画布' });
+      return;
+    }
+    const ws = this.provider.storage.workspace(this.workspaceId);
+    const db = ws.db(source);
+    const snapshotFile = await db.latestSnapshot();
+    if (!snapshotFile) {
+      this.post({ type: 'reply', requestId, ok: false, error: '数据库快照不可用' });
+      return;
+    }
+    const snapshot = await db.readSnapshot(snapshotFile);
+    const nameSet = new Set(tables);
+    const srcTables = snapshot.tables.filter((t) => nameSet.has(t.name));
+    if (!srcTables.length) {
+      this.post({ type: 'reply', requestId, ok: true });
+      return;
+    }
+
+    const designData = await this.store.source(this.workspaceId, 'design', this.designId);
+    const existingTables = (designData.schema?.tables ?? []).map((t) => t.key);
+    const hasConflict = srcTables.some((t) => existingTables.includes(t.name));
+
+    let onConflict: ConflictStrategy = 'skip';
+    if (hasConflict) {
+      const pick = await vscode.window.showWarningMessage(
+        '部分表名在设计中已存在',
+        { modal: true, detail: '可以跳过已存在的表，或者自动改名后添加。' },
+        '跳过已存在的',
+        '自动改名',
+      );
+      if (!pick) {
+        this.post({ type: 'reply', requestId, ok: false, error: '已取消' });
+        return;
+      }
+      onConflict = pick === '自动改名' ? 'rename' : 'skip';
+    }
+
+    const result = copyTableOps(srcTables, snapshot.relations ?? [], { existingTables, onConflict });
+    if (!result.ops.length) {
+      this.post({ type: 'reply', requestId, ok: true });
+      return;
+    }
+
+    const canvasEdit: CanvasEdit = [];
+    if (result.copied.length) {
+      const existing = this.document.state.nodes;
+      const maxX = existing.length ? Math.max(...existing.map((n) => n.x)) : 0;
+      const nodes = result.copied.map((name, i) => ({
+        source: DESIGN_SOURCE,
+        table: name,
+        x: maxX + 300,
+        y: i * 120,
+      }));
+      canvasEdit.push({ op: 'nodes.put', nodes });
+    }
+
+    await this.applyDesignOps(requestId, result.ops, '复制数据库表到设计', canvasEdit.length ? canvasEdit : undefined);
+  }
+
+  private async openRaw(source: string): Promise<void> {
+    if (!this.workspaceId || !this.designId) return;
     const ws = this.provider.storage.workspace(this.workspaceId);
     let uri: vscode.Uri | undefined;
-    if (s.kind === 'design') {
-      uri = ws.design(s.ref).schemaFile;
+    if (source === DESIGN_SOURCE) {
+      uri = ws.design(this.designId).schemaFile;
     } else {
-      const db = ws.db(s.ref);
-      const file = s.snapshot ?? (await db.latestSnapshot());
+      const db = ws.db(source);
+      const file = await db.latestSnapshot();
       uri = file ? db.snapshotUri(file) : undefined;
     }
     if (uri) await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Beside, preview: true });
   }
 
   dispose(): void {
+    clearTimeout(this.pendingTimer);
     while (this.disposables.length) this.disposables.pop()?.dispose();
   }
 }
 
-function sourceSignature(s: CanvasFile['sources'][number] | undefined): string {
-  return s ? `${s.kind}:${s.ref}@${s.snapshot ?? ''}` : '';
+function sourceSignature(source: string): string {
+  return source;
 }
 
 function comparisonSignature(canvas: CanvasFile): string {
-  const c = canvas.comparison;
-  if (!c) return '';
-  const d = canvas.sources.find((s) => s.alias === c.design);
-  const b = canvas.sources.find((s) => s.alias === c.db);
-  return `${sourceSignature(d)}|${sourceSignature(b)}`;
+  return canvas.comparison?.db ?? '';
 }
 
 export async function buildCatalog(storage: HarnessStorage, store: ModelStore, workspaceId: string): Promise<WorkspaceCatalog> {
   const ws = storage.workspace(workspaceId);
-  const [meta, designIds, dbIds] = await Promise.all([ws.readMeta(), ws.designIds(), ws.dbIds()]);
-  const design = await Promise.all(
-    designIds.map(async (id) => {
-      const s = await store.source(workspaceId, 'design', id);
-      return { id, name: s.name, tableCount: s.schema?.tables.length ?? 0 };
-    }),
-  );
+  const [meta, dbIds] = await Promise.all([ws.readMeta(), ws.dbIds()]);
   const db = await Promise.all(
     dbIds.map(async (id) => {
       const s = await store.source(workspaceId, 'db', id);
       return { id, name: s.name, tableCount: s.schema?.tables.length, hasSnapshot: !!s.snapshot };
     }),
   );
-  return { workspace: { id: workspaceId, name: meta.name }, design, db };
+  return { workspace: { id: workspaceId, name: meta.name }, db };
 }

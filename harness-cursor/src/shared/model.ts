@@ -96,22 +96,10 @@ export interface NormalizedSchema {
   enums: NEnum[];
 }
 
-/** Content of a design source's `ext.json`: everything the tbls format cannot express. */
+/** Content of a design's `ext.json`: everything the tbls format cannot express. */
 export interface DesignExt {
   version: 2;
   relations: RelationExt[];
-  /** Domain modules of the model itself; unrelated to the visual group boxes on a canvas. */
-  modules: GroupExt[];
-}
-
-/** How one design source is compared against one db source. Shared by every canvas in the workspace. */
-export interface ComparisonPair {
-  design: string;
-  db: string;
-  /** design table key -> db table key, only needed when the names differ. */
-  tableMappings: Record<string, string>;
-  /** Diff item ids the user has confirmed as intentional. */
-  acceptedDiffs: string[];
 }
 
 export interface RelationExt {
@@ -120,13 +108,6 @@ export interface RelationExt {
   kind: RelationKind;
   discriminator?: string;
   note?: string;
-}
-
-export interface GroupExt {
-  name: string;
-  desc?: string;
-  color?: string;
-  tables: string[];
 }
 
 export type DiffKind =

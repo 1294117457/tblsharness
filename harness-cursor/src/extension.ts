@@ -4,6 +4,9 @@ import { registerCanvasCommands } from './commands/canvas';
 import type { Harness } from './commands/common';
 import { registerDbCommands } from './commands/db';
 import { registerDesignCommands } from './commands/design';
+import { registerDiagramCommands } from './commands/diagram';
+import { DiagramEditorProvider } from './diagram/diagramEditor';
+import { DiagramService } from './diagram/diagramService';
 import { registerWorkspaceCommands } from './commands/workspace';
 import { ConnectionPanels } from './connection/connectionPanel';
 import { EditPanels } from './edit/editPanel';
@@ -16,15 +19,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const store = new ModelStore(storage, context.secrets);
   const tree = new WorkspaceTreeProvider(storage, store, context.secrets, context.extensionUri);
   const treeView = vscode.window.createTreeView('harness.workspaces', { treeDataProvider: tree, showCollapseAll: true });
-  const canvases = CanvasEditorProvider.register(context, storage, store);
+  const diagrams = new DiagramService(storage, store);
+  tree.diagrams = diagrams;
+  const canvases = CanvasEditorProvider.register(context, storage, store, diagrams);
   tree.openCanvasName = (uri) => canvases.openDocument(uri)?.state.name;
-  const h = { context, storage, store, tree, treeView, canvases } as Harness;
+  const h = { context, storage, store, tree, treeView, canvases, diagrams } as Harness;
   h.connections = new ConnectionPanels(h);
   h.editors = new EditPanels(h);
 
-  context.subscriptions.push(store, tree, treeView, h.connections, h.editors, canvases.onDidChangeOpenName(() => tree.refresh()));
+  context.subscriptions.push(
+    store,
+    tree,
+    treeView,
+    diagrams,
+    h.connections,
+    h.editors,
+    canvases.onDidChangeOpenName(() => tree.refresh()),
+    DiagramEditorProvider.register(context, diagrams, store),
+  );
   registerWorkspaceCommands(h);
   registerDesignCommands(h);
+  registerDiagramCommands(h);
   registerDbCommands(h);
   registerCanvasCommands(h);
 

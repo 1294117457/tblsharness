@@ -6,6 +6,7 @@
 - **设计库**：tbls 格式的 `schema.json` 加上扩展信息 `ext.json`。不需要连接数据库就能创建和编辑，可以直接用 `tbls doc json://...` 生成文档。
 - **数据库**：调用 `tbls out -t json` 读取数据库结构，原样保存为快照。在画布上只读。名称直接显示连接的 `主机:端口/库名`（端口始终显示，SQLite 显示文件名，离线导入的显示导入时的名称），不能单独改名；图标按数据库类型显示。这个名称只在界面上显示，不会写进任何文件。
 - **画布**：`*.canvas.json`，只保存引用了哪些数据源、放了哪些表、放在哪里。表的内容每次都从数据源实时读取，同一张表可以出现在多个画布里。
+- **设计图**：设计库下的 Mermaid 图，支持 ER 图、状态图、时序图、流程图、数据流图。可以把图"复制给 AI"，让 AI 按规范修改 Mermaid 文本；ER 图和表结构不一致时，差异列在右侧面板里，由你勾选确认后才同步到表结构。AI 不会直接改表结构。
 
 插件不会修改数据库。要改数据库结构，由用户和 AI 根据差异生成 SQL，用户自己执行后再同步。
 
@@ -18,7 +19,13 @@
    - 从一个字段拖到另一张表的字段上建立关系，选择关系类型（外键、逻辑关系、JSON 数组、多态、字典）；
    - 按 **Delete 只从画布移除**。要从设计库中删除表，用右键菜单"从设计库中删除表…"，并在弹窗中确认；
    - 工具栏"对比"选择一个设计库和一个数据库，差异会直接标在表上，右侧"差异"页签列出全部差异，可以确认为有意的偏差；
-   - Ctrl+Z / Ctrl+Shift+Z 撤销和重做，设计编辑也可以撤销。
+   - Ctrl+Z / Ctrl+Shift+Z 撤销和重做，设计编辑也可以撤销；
+   - 属性面板选中一张表时，可以在"快速添加字段"里一行写一个字段，例如 `email varchar(128) not null unique 登录邮箱`，或者点 id / created_at / updated_at / deleted_at 模板。
+4. 用设计图和 AI 一起设计：
+   - 在设计库的"设计图"下点 +，选择图的类型。ER 图可以从空白开始，也可以从全部表、某个模块或挑选的表生成；
+   - 编辑器左边是 Mermaid 文本，中间是预览，右边是"与表结构的差异"。点"复制给 AI"会把书写规范和当前内容一起复制，粘贴到对话里再写上你的需求；把 AI 返回的 ER 图粘回来，右侧会列出要新增、修改、删除的表、字段和关系；
+   - 勾选要同步的项，点"同步选中的项到表结构"。删除类默认不勾选，删表还会再确认一次。不想同步的项可以"忽略"；
+   - 画布右侧的"待同步"页签也会列出画布上各设计库 ER 图的差异，在那里同步的内容可以用 Ctrl+Z 撤销。
 
 连接串只保存在系统凭据里，不会写进任何文件。建议使用只读的数据库账号。导入带 `dsn` 的 `.tbls.yml` 时，插件会去掉 `dsn` 再保存，并提示把它存入凭据。
 
@@ -63,7 +70,7 @@ npm run build
 <存储目录>/workspaces/<工作区ID>/
 ├─ workspace.yml
 ├─ comparisons.json               # 设计源和数据库源之间的表名映射、已确认的差异
-├─ design/<ID>/source.yml, schema.json, ext.json
+├─ design/<ID>/source.yml, schema.json, ext.json, diagrams/<ID>.md
 ├─ db/<ID>/source.yml, .tbls.yml（可选，不含 dsn）, snapshots/*.json
 └─ canvas/<ID>.canvas.json
 ```
@@ -85,11 +92,12 @@ src/
 ├─ model/                       # normalize（tbls JSON → 统一模型）、类型映射、模型缓存
 ├─ diff/diff.ts                 # 设计库与数据库的结构对比
 ├─ canvas/canvasEditor.ts       # 画布自定义编辑器：撤销重做、保存、和 Webview 通信
+├─ diagram/                     # 设计图编辑器、ER 图与表结构的差异和同步
 ├─ views/workspaceTree.ts       # 侧边栏树视图
 ├─ commands/                    # 各类命令
 ├─ webview/html.ts              # Webview HTML（生产模式 / Vite 开发模式）
 └─ tbls/runner.ts               # 调用 tbls（报错信息里会遮掉密码）
-webview-ui/src/                 # Vue 3 + Vue Flow + elkjs
+webview-ui/src/                 # Vue 3 + Vue Flow + elkjs + mermaid
 test/                           # 单元测试
 ```
 
@@ -117,3 +125,4 @@ tbls 的 JSON 是数据库的原始快照，`normalize.ts` 负责把它转换成
 - 还没有检测改名：改名会显示成"一边缺少、一边多出"
 - 复合外键在画布上只连接第一列
 - MCP Server、接入 `tbls lint` 都还没做
+- 设计图：表改名后图里的名字不会跟着改；只有 ER 图能同步到表结构；默认值、索引、enum 不能在 ER 图里表达

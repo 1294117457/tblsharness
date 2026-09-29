@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import type { DiagramService } from '../diagram/diagramService';
 import type { ModelStore } from '../model/store';
+import { diagramTypeLabel, type DiagramType } from '../shared/diagram';
 import { driverInfo, type ConnectionDriver } from '../shared/connection';
 import type { NColumn, NTable } from '../shared/model';
 import { driverLabel, type SourceKind } from '../shared/workspace';
@@ -7,7 +9,7 @@ import { parseCanvas } from '../shared/canvas';
 import { readText } from '../workspace/fsUtil';
 import type { HarnessStorage } from '../workspace/storage';
 
-type Group = 'design' | 'db' | 'canvas';
+type Group = 'design' | 'db';
 
 /** Drivers with a brand icon under media/db (`<driver>-light.svg` / `<driver>-dark.svg`). */
 const DRIVER_ICONS = new Set<ConnectionDriver>(['postgres', 'mysql', 'mariadb', 'sqlserver', 'sqlite', 'clickhouse', 'redshift']);
@@ -17,15 +19,30 @@ export type TreeNode =
   | { kind: 'group'; workspace: string; group: Group }
   | { kind: 'placeholder'; workspace: string; group: Group }
   | { kind: 'design'; workspace: string; id: string }
+  /** "表结构" under a design; `id` is the design ID. */
+  | { kind: 'designTables'; workspace: string; id: string }
+  /** "设计图" under a design; `id` is the design ID. */
+  | { kind: 'diagramGroup'; workspace: string; id: string }
+  | { kind: 'diagramPlaceholder'; workspace: string; id: string }
+  | { kind: 'diagram'; workspace: string; design: string; id: string }
+  /** "画布" group under a design. `id` is the design. */
+  | { kind: 'canvasGroup'; workspace: string; id: string }
+  | { kind: 'canvas'; workspace: string; design: string; id: string }
   | { kind: 'db'; workspace: string; id: string }
-  | { kind: 'canvas'; workspace: string; id: string }
   | { kind: 'table'; workspace: string; source: SourceKind; id: string; table: NTable; fks: Set<string> }
   | { kind: 'column'; workspace: string; source: SourceKind; id: string; table: string; column: NColumn; fk: boolean };
 
+const DIAGRAM_ICONS: Record<DiagramType, string> = {
+  er: 'type-hierarchy-sub',
+  state: 'debug-step-over',
+  sequence: 'arrow-swap',
+  flow: 'git-merge',
+  dataflow: 'arrow-both',
+};
+
 const GROUP_INFO: Record<Group, { label: string; icon: string; empty: string; command: string }> = {
-  design: { label: '设计库', icon: 'edit', empty: '还没有设计库，点击新建', command: 'harness.design.create' },
+  design: { label: '设计画布', icon: 'edit', empty: '还没有设计画布，点击新建', command: 'harness.design.create' },
   db: { label: '数据库', icon: 'database', empty: '还没有数据库，点击添加', command: 'harness.db.create' },
-  canvas: { label: '画布', icon: 'layout', empty: '还没有画布，点击新建', command: 'harness.canvas.create' },
 };
 
 export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscode.Disposable {
@@ -37,6 +54,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
   readonly syncErrors = new Map<string, string>();
   /** Name of a canvas that is open (possibly with an unsaved rename); set by the canvas editor. */
   openCanvasName: (uri: vscode.Uri) => string | undefined = () => undefined;
+  diagrams: DiagramService | undefined;
 
   constructor(
     private readonly storage: HarnessStorage,
@@ -106,6 +124,57 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         item.contextValue = 'design';
         return item;
       }
+      case 'designTables': {
+        const loaded = await this.store.source(node.workspace, 'design', node.id);
+        const count = loaded.schema?.tables.length ?? 0;
+        const item = new vscode.TreeItem('表结构', count ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+        item.id = `ws:${node.workspace}:design:${node.id}:tables`;
+        item.description = `${count} 张表`;
+        item.tooltip = '表、字段和关系（tbls JSON）。点击在画布中打开。';
+        item.iconPath = new vscode.ThemeIcon('table');
+        item.contextValue = 'designTables';
+        item.command = { command: 'harness.design.open', title: '打开表结构', arguments: [node] };
+        return item;
+      }
+      case 'canvasGroup': {
+        const count = (await ws.design(node.id).canvasIds()).length;
+        const item = new vscode.TreeItem('画布', vscode.TreeItemCollapsibleState.Collapsed);
+        item.id = `ws:${node.workspace}:design:${node.id}:canvases`;
+        item.description = count ? String(count) : undefined;
+        item.tooltip = '画布：显示和编辑表之间的关系';
+        item.iconPath = new vscode.ThemeIcon('type-hierarchy');
+        item.contextValue = 'canvasGroup';
+        return item;
+      }
+      case 'diagramGroup': {
+        const count = (await ws.design(node.id).diagramIds()).length;
+        const item = new vscode.TreeItem('设计图', vscode.TreeItemCollapsibleState.Collapsed);
+        item.id = `ws:${node.workspace}:design:${node.id}:diagrams`;
+        item.description = count ? String(count) : undefined;
+        item.tooltip = 'Mermaid 设计图：ER 图、状态图、时序图、流程图、数据流图。ER 图可以确认后同步到表结构。';
+        item.iconPath = new vscode.ThemeIcon('graph');
+        item.contextValue = 'diagramGroup';
+        return item;
+      }
+      case 'diagramPlaceholder': {
+        const item = new vscode.TreeItem('还没有设计图，点击新建', vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon('add');
+        item.contextValue = 'placeholder';
+        item.command = { command: 'harness.diagram.create', title: '新建设计图', arguments: [{ kind: 'diagramGroup', workspace: node.workspace, id: node.id }] };
+        return item;
+      }
+      case 'diagram': {
+        const file = await this.diagrams?.read({ workspace: node.workspace, design: node.design, diagram: node.id });
+        const item = new vscode.TreeItem(file?.meta.name ?? node.id, vscode.TreeItemCollapsibleState.None);
+        item.id = `ws:${node.workspace}:design:${node.design}:diagram:${node.id}`;
+        item.description = file ? diagramTypeLabel(file.meta.type) : undefined;
+        item.tooltip = `${file?.meta.name ?? node.id}（ID：${node.id}）${file?.meta.description ? `\n${file.meta.description}` : ''}`;
+        item.iconPath = new vscode.ThemeIcon(DIAGRAM_ICONS[file?.meta.type ?? 'er']);
+        item.contextValue = 'diagram';
+        item.resourceUri = ws.design(node.design).diagramUri(node.id);
+        item.command = { command: 'harness.diagram.open', title: '打开设计图', arguments: [node] };
+        return item;
+      }
       case 'db': {
         const [loaded, meta, dsn] = await Promise.all([
           this.store.source(node.workspace, 'db', node.id),
@@ -134,25 +203,26 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         return item;
       }
       case 'canvas': {
-        const uri = ws.canvasUri(node.id);
+        const design = ws.design(node.design);
+        const uri = design.canvasUri(node.id);
         let label = node.id;
         let description: string | undefined;
         try {
           const canvas = parseCanvas(await readText(uri));
           label = canvas.name;
-          description = `${canvas.sources.length} 个数据源 · ${canvas.nodes.length} 张表`;
+          description = `${canvas.nodes.length} 张表`;
         } catch {
           description = '读取失败';
         }
         label = this.openCanvasName(uri) ?? label;
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-        item.id = `ws:${node.workspace}:canvas:${node.id}`;
+        item.id = `ws:${node.workspace}:design:${node.design}:canvas:${node.id}`;
         item.description = description;
         item.tooltip = `${label}（ID：${node.id}）`;
         item.iconPath = new vscode.ThemeIcon('type-hierarchy');
         item.contextValue = 'canvas';
         item.resourceUri = uri;
-        item.command = { command: 'harness.canvas.open', title: '打开画布', arguments: [node] };
+        item.command = { command: 'harness.canvas.open', title: '打开画布', arguments: [{ workspace: node.workspace, design: node.design, kind: 'canvas', id: node.id }] };
         return item;
       }
       case 'table': {
@@ -185,15 +255,35 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
     }
     switch (node.kind) {
       case 'workspace':
-        return (['design', 'db', 'canvas'] as Group[]).map((group) => ({ kind: 'group', workspace: node.workspace, group }));
+        return (['design', 'db'] as Group[]).map((group) => ({ kind: 'group', workspace: node.workspace, group }));
       case 'group': {
         const ids = await this.groupIds(node.workspace, node.group);
         if (!ids.length) return [{ kind: 'placeholder', workspace: node.workspace, group: node.group }];
-        return ids.map((id) => ({ kind: node.group, workspace: node.workspace, id }) as TreeNode);
+        if (node.group === 'design') return ids.map((id) => ({ kind: 'design', workspace: node.workspace, id }));
+        return ids.map((id) => ({ kind: 'db', workspace: node.workspace, id }));
       }
       case 'design':
+        return [
+          { kind: 'designTables', workspace: node.workspace, id: node.id },
+          { kind: 'canvasGroup', workspace: node.workspace, id: node.id },
+          { kind: 'diagramGroup', workspace: node.workspace, id: node.id },
+        ];
+      case 'canvasGroup': {
+        const ids = await this.storage.workspace(node.workspace).design(node.id).canvasIds();
+        if (!ids.length) {
+          return []; // canvases can be empty; design.open creates one on demand
+        }
+        return ids.map((id) => ({ kind: 'canvas', workspace: node.workspace, design: node.id, id }));
+      }
+      case 'diagramGroup': {
+        const ids = await this.storage.workspace(node.workspace).design(node.id).diagramIds();
+        if (!ids.length) return [{ kind: 'diagramPlaceholder', workspace: node.workspace, id: node.id }];
+        return ids.map((id) => ({ kind: 'diagram', workspace: node.workspace, design: node.id, id }));
+      }
+      case 'designTables':
       case 'db': {
-        const loaded = await this.store.source(node.workspace, node.kind, node.id);
+        const source: SourceKind = node.kind === 'db' ? 'db' : 'design';
+        const loaded = await this.store.source(node.workspace, source, node.id);
         const schema = loaded.schema;
         if (!schema) return [];
         const fks = new Map<string, Set<string>>();
@@ -205,7 +295,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         return schema.tables.map((table) => ({
           kind: 'table',
           workspace: node.workspace,
-          source: node.kind,
+          source,
           id: node.id,
           table,
           fks: fks.get(table.key) ?? new Set(),
@@ -235,9 +325,17 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
       case 'placeholder':
         return { kind: 'workspace', workspace: node.workspace };
       case 'design':
+        return { kind: 'group', workspace: node.workspace, group: 'design' };
       case 'db':
+        return { kind: 'group', workspace: node.workspace, group: 'db' };
+      case 'designTables':
+      case 'canvasGroup':
+      case 'diagramGroup':
+        return { kind: 'design', workspace: node.workspace, id: node.id };
       case 'canvas':
-        return { kind: 'group', workspace: node.workspace, group: node.kind };
+        return { kind: 'canvasGroup', workspace: node.workspace, id: node.design };
+      case 'diagram':
+        return { kind: 'diagramGroup', workspace: node.workspace, id: node.design };
       default:
         return undefined;
     }
@@ -246,7 +344,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
   /** Numeric order, so `design10` comes after `design9` (creation order). */
   private async groupIds(workspace: string, group: Group): Promise<string[]> {
     const ws = this.storage.workspace(workspace);
-    const ids = await (group === 'design' ? ws.designIds() : group === 'db' ? ws.dbIds() : ws.canvasIds());
+    const ids = await (group === 'design' ? ws.designIds() : ws.dbIds());
     return ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   }
 

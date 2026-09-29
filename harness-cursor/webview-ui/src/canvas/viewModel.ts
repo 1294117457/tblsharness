@@ -1,7 +1,6 @@
-import { nodeId, type CanvasFile, type ColumnDisplay } from '@shared/canvas';
+import { DESIGN_SOURCE, nodeId, type CanvasFile, type ColumnDisplay } from '@shared/canvas';
 import type { DiffItem, NColumn, NRelation, NTable, RelationKind } from '@shared/model';
 import type { ComparisonData, SourceData } from '@shared/protocol';
-import type { SourceKind } from '@shared/workspace';
 
 export type Mark = 'design-only' | 'db-only' | 'mismatch' | 'accepted';
 
@@ -15,14 +14,13 @@ export interface ColumnView {
   comment?: string;
   mark?: Mark;
   note?: string;
-  /** Column exists only on the db side and was merged into a design node. */
   fromDb?: boolean;
 }
 
 export interface TableView {
   id: string;
-  alias: string;
-  sourceKind: SourceKind;
+  source: string;
+  sourceKind: 'design' | 'db';
   sourceName: string;
   key: string;
   comment?: string;
@@ -30,12 +28,10 @@ export interface TableView {
   editable: boolean;
   missing: boolean;
   display: ColumnDisplay;
-  /** All columns; `visibleColumns` is what the node renders. */
   columns: ColumnView[];
   visibleColumns: ColumnView[];
   mark?: Mark;
   note?: string;
-  /** Overlay mode: the db table merged into this design node. */
   mergedDbTable?: string;
 }
 
@@ -48,13 +44,26 @@ export interface EdgeView {
   kind: RelationKind | 'mapping';
   label?: string;
   mark?: Mark;
-  alias?: string;
+  edgeSource?: string;
   relationKey?: string;
+}
+
+export interface ZoneView {
+  id: string;
+  name: string;
+  color?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  viewpoint?: string;
+  tableCount: number;
 }
 
 export interface CanvasView {
   tables: TableView[];
   edges: EdgeView[];
+  zones: ZoneView[];
 }
 
 export const TABLE_HANDLE = '__table';
@@ -77,57 +86,72 @@ export function buildView(canvas: CanvasFile, sources: Record<string, SourceData
   const tables = new Map<string, TableView>();
   const placed = new Map(canvas.nodes.map((n) => [nodeId(n.source, n.table), n]));
 
-  for (const source of canvas.sources) {
-    const data = sources[source.alias];
+  const sourceIds = new Set(canvas.nodes.map((n) => n.source));
+  sourceIds.add(DESIGN_SOURCE);
+
+  for (const src of sourceIds) {
+    const data = sources[src];
     const schema = data?.schema;
     const byKey = new Map((schema?.tables ?? []).map((t) => [t.key, t]));
     const fks = foreignKeys(schema?.relations ?? []);
-    const keys = new Set<string>(source.tables === 'all' ? byKey.keys() : []);
-    for (const n of canvas.nodes) if (n.source === source.alias) keys.add(n.table);
+    const isDesign = src === DESIGN_SOURCE;
+    const showAll = isDesign && canvas.designTables === 'all';
+    const keys = new Set<string>(showAll ? byKey.keys() : []);
+    for (const n of canvas.nodes) if (n.source === src) keys.add(n.table);
 
+    const sourceKind: 'design' | 'db' = isDesign ? 'design' : 'db';
     for (const key of keys) {
-      const id = nodeId(source.alias, key);
+      const id = nodeId(src, key);
       const table = byKey.get(key);
       const display = placed.get(id)?.display ?? canvas.settings.columnDisplay;
-      tables.set(id, tableView(id, source.alias, source.kind, data?.name ?? source.ref, key, table, fks.get(key), display));
+      tables.set(id, mkTableView(id, src, sourceKind, data?.name ?? src, key, table, fks.get(key), display));
     }
   }
 
   const edges: EdgeView[] = [];
   const c = canvas.comparison;
   const hidden = new Set<string>();
-  if (c && comparison && sources[c.design]?.schema && sources[c.db]?.schema) {
-    applyComparison(tables, edges, hidden, c.design, c.db, c.mode, sources, comparison);
+  if (c && comparison && sources[DESIGN_SOURCE]?.schema && sources[c.db]?.schema) {
+    applyComparison(tables, edges, hidden, c.db, c.mode, sources, comparison);
   }
 
-  for (const source of canvas.sources) {
-    const schema = sources[source.alias]?.schema;
+  for (const src of sourceIds) {
+    const schema = sources[src]?.schema;
     if (!schema) continue;
-    const isComparedDb = c && comparison && source.alias === c.db;
+    const isComparedDb = c && comparison && src === c.db;
     for (const r of schema.relations) {
-      let from = nodeId(source.alias, r.from.table);
-      let to = nodeId(source.alias, r.to.table);
+      let from = nodeId(src, r.from.table);
+      let to = nodeId(src, r.to.table);
       if (isComparedDb && c.mode === 'overlay') {
-        // Only db relations the design lacks are drawn; they attach to the merged design nodes where possible.
         const item = comparison.diff.items.find((i) => i.kind === 'relation_missing_in_design' && i.relation === r.key);
         if (!item) continue;
-        from = redirect(from, tables, c.design);
-        to = redirect(to, tables, c.design);
+        from = redirect(from, tables);
+        to = redirect(to, tables);
       }
       if (!tables.has(from) || !tables.has(to) || hidden.has(from) || hidden.has(to)) continue;
-      edges.push(relationEdge(source.alias, r, from, to, tables, relationMark(source.alias, r, c, comparison)));
+      edges.push(relationEdge(src, r, from, to, tables, relationMark(src, r, c, comparison)));
     }
   }
 
   const visible = [...tables.values()].filter((t) => !hidden.has(t.id));
   for (const t of visible) t.visibleColumns = visibleColumns(t);
-  return { tables: visible, edges };
+
+  const zonedNodes = new Map<string, number>();
+  for (const n of canvas.nodes) {
+    if (n.zone) zonedNodes.set(n.zone, (zonedNodes.get(n.zone) ?? 0) + 1);
+  }
+  const zones: ZoneView[] = canvas.zones.map((z) => ({
+    ...z,
+    tableCount: zonedNodes.get(z.id) ?? 0,
+  }));
+
+  return { tables: visible, edges, zones };
 }
 
-function tableView(
+function mkTableView(
   id: string,
-  alias: string,
-  sourceKind: SourceKind,
+  source: string,
+  sourceKind: 'design' | 'db',
   sourceName: string,
   key: string,
   table: NTable | undefined,
@@ -136,7 +160,7 @@ function tableView(
 ): TableView {
   return {
     id,
-    alias,
+    source,
     sourceKind,
     sourceName,
     key,
@@ -178,10 +202,9 @@ function foreignKeys(relations: NRelation[]): Map<string, Set<string>> {
   return map;
 }
 
-function relationEdge(alias: string, r: NRelation, fromId: string, toId: string, tables: Map<string, TableView>, mark?: Mark): EdgeView {
-  // Parent on the source side, child on the target side; composite keys are drawn from their first column.
+function relationEdge(src: string, r: NRelation, fromId: string, toId: string, tables: Map<string, TableView>, mark?: Mark): EdgeView {
   return {
-    id: `${alias}|${r.key}`,
+    id: `${src}|${r.key}`,
     source: toId,
     sourceHandle: handleFor(tables.get(toId), r.to.columns[0], 's'),
     target: fromId,
@@ -189,7 +212,7 @@ function relationEdge(alias: string, r: NRelation, fromId: string, toId: string,
     kind: r.kind,
     label: KIND_LABELS[r.kind] || undefined,
     mark,
-    alias,
+    edgeSource: src,
     relationKey: r.key,
   };
 }
@@ -198,22 +221,21 @@ function markOf(item: DiffItem, mark: Mark): Mark {
   return item.accepted ? 'accepted' : mark;
 }
 
-function relationMark(alias: string, r: NRelation, c: CanvasFile['comparison'], comparison?: ComparisonData): Mark | undefined {
-  if (!c || !comparison || (alias !== c.design && alias !== c.db)) return undefined;
-  const kind = alias === c.design ? 'relation_missing_in_db' : 'relation_missing_in_design';
+function relationMark(src: string, r: NRelation, c: CanvasFile['comparison'], comparison?: ComparisonData): Mark | undefined {
+  if (!c || !comparison || (src !== DESIGN_SOURCE && src !== c.db)) return undefined;
+  const kind = src === DESIGN_SOURCE ? 'relation_missing_in_db' : 'relation_missing_in_design';
   const item = comparison.diff.items.find((i) => i.kind === kind && i.relation === r.key);
-  return item && markOf(item, alias === c.design ? 'design-only' : 'db-only');
+  return item && markOf(item, src === DESIGN_SOURCE ? 'design-only' : 'db-only');
 }
 
 function dbKeyFor(designKey: string, mappings: Record<string, string>): string {
   return mappings[designKey] ?? designKey;
 }
 
-/** In overlay mode a db table is drawn as the design node it merged into, whether or not the db node itself is on the canvas. */
-function redirect(dbNodeId: string, tables: Map<string, TableView>, designAlias: string): string {
+function redirect(dbNodeId: string, tables: Map<string, TableView>): string {
   const dbKey = dbNodeId.slice(dbNodeId.indexOf('/') + 1);
   for (const t of tables.values()) {
-    if (t.alias === designAlias && t.mergedDbTable === dbKey) return t.id;
+    if (t.source === DESIGN_SOURCE && t.mergedDbTable === dbKey) return t.id;
   }
   return dbNodeId;
 }
@@ -222,21 +244,20 @@ function applyComparison(
   tables: Map<string, TableView>,
   edges: EdgeView[],
   hidden: Set<string>,
-  designAlias: string,
-  dbAlias: string,
+  dbSource: string,
   mode: 'overlay' | 'side-by-side',
   sources: Record<string, SourceData>,
   comparison: ComparisonData,
 ): void {
   const mappings = comparison.tableMappings;
-  const dbSchema = sources[dbAlias].schema!;
+  const dbSchema = sources[dbSource].schema!;
   const dbTables = new Map(dbSchema.tables.map((t) => [t.key, t]));
   const dbFks = foreignKeys(dbSchema.relations);
-  const designNode = (key: string) => tables.get(nodeId(designAlias, key));
-  const dbNode = (key: string) => tables.get(nodeId(dbAlias, key));
+  const designNode = (key: string) => tables.get(nodeId(DESIGN_SOURCE, key));
+  const dbNode = (key: string) => tables.get(nodeId(dbSource, key));
 
   for (const t of tables.values()) {
-    if (t.alias !== designAlias || t.missing) continue;
+    if (t.source !== DESIGN_SOURCE || t.missing) continue;
     const dbKey = dbKeyFor(t.key, mappings);
     if (!dbTables.has(dbKey)) continue;
     const counterpart = dbNode(dbKey);

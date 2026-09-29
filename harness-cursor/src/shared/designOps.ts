@@ -1,4 +1,4 @@
-import { relationKey, type DesignExt, type GroupExt, type RelationExt, type RelationKind } from './model';
+import { relationKey, type DesignExt, type RelationExt, type RelationKind } from './model';
 import type { TblsCardinality, TblsColumn, TblsConstraint, TblsRelation, TblsSchema, TblsTable } from './tbls';
 
 export interface DesignDoc {
@@ -49,17 +49,12 @@ export type DesignOp =
 export class DesignOpError extends Error {}
 
 export function emptyExt(): DesignExt {
-  return { version: 2, relations: [], modules: [] };
+  return { version: 2, relations: [] };
 }
 
-/** Accepts the stage-1 layout (`groups`, version 1) as well. */
 export function parseExt(raw: unknown): DesignExt {
-  const r = (raw ?? {}) as Partial<DesignExt> & { groups?: GroupExt[] };
-  return {
-    version: 2,
-    relations: Array.isArray(r.relations) ? r.relations : [],
-    modules: Array.isArray(r.modules) ? r.modules : Array.isArray(r.groups) ? r.groups : [],
-  };
+  const r = (raw ?? {}) as Partial<DesignExt>;
+  return { version: 2, relations: Array.isArray(r.relations) ? r.relations : [] };
 }
 
 export function emptyDesignSchema(name: string, driver: string): TblsSchema {
@@ -79,6 +74,7 @@ export function designFromSnapshot(schema: TblsSchema, name?: string): TblsSchem
     relations: schema.relations ?? [],
     enums: schema.enums,
     driver: schema.driver && { name: schema.driver.name, meta: { current_schema: schema.driver.meta?.current_schema } },
+    viewpoints: schema.viewpoints?.length ? schema.viewpoints : undefined,
   };
 }
 
@@ -327,7 +323,19 @@ class Editor {
       }
       this.regenerateDefs();
     });
-    this.ext.modules = this.ext.modules.map((m) => ({ ...m, tables: m.tables.map((x) => (x === fromKey ? to : x)) }));
+    this.updateViewpoints((x) => (x === fromKey || x === oldRaw ? (x === oldRaw ? newRaw : to) : x));
+  }
+
+  /** `viewpoints[].tables` may hold either the raw or the stripped name; both are matched. */
+  private updateViewpoints(map: (table: string) => string | undefined): void {
+    if (!this.schema.viewpoints) return;
+    const apply = (tables?: string[]) => tables && tables.map(map).filter((x): x is string => x !== undefined);
+    this.schema.viewpoints = this.schema.viewpoints.map((v) => {
+      const next = { ...v };
+      if (v.tables) next.tables = apply(v.tables);
+      if (v.groups) next.groups = v.groups.map((g) => (g.tables ? { ...g, tables: apply(g.tables) } : g));
+      return next;
+    });
   }
 
   private deleteTable(key: string): void {
@@ -340,7 +348,7 @@ class Editor {
     for (const other of this.schema.tables) {
       if (other.constraints) other.constraints = other.constraints.filter((c) => c.referenced_table !== raw);
     }
-    this.ext.modules = this.ext.modules.map((m) => ({ ...m, tables: m.tables.filter((x) => x !== key) }));
+    this.updateViewpoints((x) => (x === key || x === raw ? undefined : x));
   }
 
   // ---- columns ----

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { Connection } from '@vue-flow/core';
-import { nodeId, parseNodeId, type CanvasEdit, type CanvasNode, type ColumnDisplay, type ComparisonMode } from '@shared/canvas';
+import { DESIGN_SOURCE, nodeId, parseNodeId, type CanvasEdit, type CanvasNode, type ColumnDisplay, type ComparisonMode } from '@shared/canvas';
 import type { RelationKind } from '@shared/model';
 import { buildView, TABLE_HANDLE, type TableView } from './canvas/viewModel';
 import { NODE_WIDTH, type Position } from './canvas/layout';
@@ -10,34 +10,53 @@ import ContextMenu, { type MenuItem } from './components/ContextMenu.vue';
 import DiffPanel from './components/DiffPanel.vue';
 import Inspector from './components/Inspector.vue';
 import SourcePanel from './components/SourcePanel.vue';
-import { canvas, designOp, editCanvas, focusNode, handleHostMessage, state, toast } from './store';
+import SyncPanel from './components/SyncPanel.vue';
+import type { SyncGroup } from '@shared/sync';
+import { applySync, canvas, designOp, editCanvas, focusNode, handleHostMessage, ignoreSync, state, toast } from './store';
 import { onHostMessage, post } from './vscode';
 
 const view = computed(() => buildView(canvas.value, state.sources, state.comparison));
 const flow = ref<InstanceType<typeof CanvasView>>();
-const rightTab = ref<'inspector' | 'diff'>('inspector');
+const rightTab = ref<'inspector' | 'diff' | 'sync'>('inspector');
 const menu = ref<{ x: number; y: number; title?: string; items: MenuItem[] }>();
 const pointer = { x: 0, y: 0 };
 
-const designSources = computed(() => canvas.value.sources.filter((s) => s.kind === 'design' && state.sources[s.alias]?.schema));
-const dbSources = computed(() => canvas.value.sources.filter((s) => s.kind === 'db'));
+const hasDesignSchema = computed(() => !!state.sources[DESIGN_SOURCE]?.schema);
+const dbSources = computed(() => Object.entries(state.sources).filter(([key]) => key !== DESIGN_SOURCE));
 const openDiffs = computed(() => state.comparison?.diff.items.filter((i) => !i.accepted).length ?? 0);
-
-const comparisonValue = computed(() => {
-  const c = canvas.value.comparison;
-  return c ? `${c.design}|${c.db}` : '';
+const pendingCount = computed(() => state.pending.reduce((n, g) => n + g.result.items.length, 0));
+/** Design source has a schema but no tables yet — the canvas offers to start from an ER diagram. */
+const emptyDesign = computed(() => {
+  const schema = state.sources[DESIGN_SOURCE]?.schema;
+  return !!schema && !schema.tables.length;
 });
+const syncBusy = ref(false);
+
+async function onApplySync(group: SyncGroup, ids: string[], choices: Record<string, string>) {
+  syncBusy.value = true;
+  try {
+    await applySync(group, ids, choices);
+  } finally {
+    syncBusy.value = false;
+  }
+}
+
+function openDiagram(group: SyncGroup) {
+  post({ type: 'diagram/open', diagram: group.diagram });
+}
+
+function newErDiagram() {
+  post({ type: 'diagram/create' });
+}
+
+const comparisonValue = computed(() => canvas.value.comparison?.db ?? '');
 
 const comparisonOptions = computed(() =>
-  canvas.value.sources
-    .filter((s) => s.kind === 'design')
-    .flatMap((d) =>
-      dbSources.value.map((b) => ({ value: `${d.alias}|${b.alias}`, label: `${sourceName(d.alias)} ↔ ${sourceName(b.alias)}` })),
-    ),
+  dbSources.value.map(([key, data]) => ({ value: key, label: data.name ?? key })),
 );
 
-function sourceName(alias: string): string {
-  return state.sources[alias]?.name ?? canvas.value.sources.find((s) => s.alias === alias)?.ref ?? alias;
+function sourceName(id: string): string {
+  return state.sources[id]?.name ?? id;
 }
 
 function tableView(id: string): TableView | undefined {
@@ -49,17 +68,17 @@ function positionOf(id: string): Position {
 }
 
 function nodeEntry(id: string): CanvasNode {
-  const { alias, table } = parseNodeId(id);
+  const { source, table } = parseNodeId(id);
   const p = positionOf(id);
-  const existing = canvas.value.nodes.find((n) => n.source === alias && n.table === table);
-  return { ...existing, source: alias, table, x: p.x, y: p.y };
+  const existing = canvas.value.nodes.find((n) => n.source === source && n.table === table);
+  return { ...existing, source, table, x: p.x, y: p.y };
 }
 
-/** Nodes of `tables: 'all'` sources only exist implicitly; pin them before an edit that needs them in `nodes`. */
-function materialize(alias: string, except = new Set<string>()): CanvasEdit {
-  const ids = view.value.tables.filter((t) => t.alias === alias && !except.has(t.id)).map((t) => t.id);
+/** Design nodes in `designTables: 'all'` mode only exist implicitly; pin them before an edit that needs them in `nodes`. */
+function materialize(except = new Set<string>()): CanvasEdit {
+  const ids = view.value.tables.filter((t) => t.source === DESIGN_SOURCE && !except.has(t.id)).map((t) => t.id);
   return [
-    { op: 'source.update', alias, patch: { tables: 'picked' } },
+    { op: 'designTables.set', mode: 'picked' },
     { op: 'nodes.put', nodes: ids.map(nodeEntry) },
   ];
 }
@@ -69,9 +88,8 @@ function removeFromCanvas(ids: string[]) {
   const tables = ids.filter((id) => !id.startsWith('note:'));
   const removing = new Set(tables);
   const edit: CanvasEdit = [];
-  for (const alias of new Set(tables.map((id) => parseNodeId(id).alias))) {
-    if (canvas.value.sources.find((s) => s.alias === alias)?.tables === 'all') edit.push(...materialize(alias, removing));
-  }
+  const designNodes = tables.filter((id) => parseNodeId(id).source === DESIGN_SOURCE);
+  if (canvas.value.designTables === 'all' && designNodes.length) edit.push(...materialize(removing));
   if (tables.length) edit.push({ op: 'nodes.remove', ids: tables });
   for (const id of notes) edit.push({ op: 'note.remove', id });
   if (!edit.length) return;
@@ -82,59 +100,49 @@ function removeFromCanvas(ids: string[]) {
   }
 }
 
-function pickMode(alias: string) {
-  editCanvas('只显示挑选的表', materialize(alias));
+function pickMode() {
+  editCanvas('只显示挑选的表', materialize());
 }
 
-function addTables(alias: string, tables: string[], near?: string) {
-  const fresh = tables.filter((t) => !tableView(nodeId(alias, t)));
+function addTables(source: string, tables: string[], near?: string) {
+  const fresh = tables.filter((t) => !tableView(nodeId(source, t)));
   if (!fresh.length) {
-    if (tables.length) focusNode(nodeId(alias, tables[0]));
+    if (tables.length) focusNode(nodeId(source, tables[0]));
     return;
   }
   const anchor = near ? positionOf(near) : flow.value?.centerPosition() ?? { x: 0, y: 0 };
   const x0 = near ? anchor.x + NODE_WIDTH + 80 : anchor.x - NODE_WIDTH / 2;
-  const nodes = fresh.map((table, i) => ({ source: alias, table, x: x0 + (near ? 0 : i * (NODE_WIDTH + 40)), y: anchor.y + (near ? i * 200 : 0) }));
+  const nodes = fresh.map((table, i) => ({ source, table, x: x0 + (near ? 0 : i * (NODE_WIDTH + 40)), y: anchor.y + (near ? i * 200 : 0) }));
   editCanvas(fresh.length > 1 ? `添加 ${fresh.length} 张表到画布` : `添加表 ${fresh[0]} 到画布`, [{ op: 'nodes.put', nodes }]);
-  if (!near) focusNode(nodeId(alias, fresh[0]));
+  if (!near) focusNode(nodeId(source, fresh[0]));
 }
 
-function uniqueTableName(alias: string): string {
-  const taken = new Set((state.sources[alias]?.schema?.tables ?? []).map((t) => t.key));
+function uniqueTableName(): string {
+  const taken = new Set((state.sources[DESIGN_SOURCE]?.schema?.tables ?? []).map((t) => t.key));
   let name = 'new_table';
   for (let i = 2; taken.has(name); i++) name = `new_table_${i}`;
   return name;
 }
 
-async function createTableIn(alias: string, position: Position) {
-  const table = uniqueTableName(alias);
-  const ok = await designOp(alias, [{ op: 'table.add', table }], `新建表 ${table}`, [
-    { op: 'nodes.put', nodes: [{ source: alias, table, x: position.x, y: position.y }] },
+async function createTableIn(position: Position) {
+  const table = uniqueTableName();
+  const ok = await designOp([{ op: 'table.add', table }], `新建表 ${table}`, [
+    { op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table, x: position.x, y: position.y }] },
   ]);
   if (ok) {
-    state.selection = { type: 'table', nodeId: nodeId(alias, table) };
+    state.selection = { type: 'table', nodeId: nodeId(DESIGN_SOURCE, table) };
     rightTab.value = 'inspector';
     toast(`已新建表 ${table}，可以在右侧修改表名和字段`);
   }
 }
 
 function createTable(position?: Position) {
-  const targets = designSources.value;
-  if (!targets.length) {
-    toast('画布上还没有可编辑的设计库。先在左侧“+ 添加”里加入或新建一个设计库。', 'error');
+  if (!state.sources[DESIGN_SOURCE]?.schema) {
+    toast('还没有加载设计库', 'error');
     return;
   }
   const p = position ?? flow.value?.centerPosition() ?? { x: 0, y: 0 };
-  if (targets.length === 1) {
-    void createTableIn(targets[0].alias, p);
-    return;
-  }
-  menu.value = {
-    x: pointer.x,
-    y: pointer.y,
-    title: '新建表到哪个设计库？',
-    items: targets.map((s) => ({ label: sourceName(s.alias), action: () => void createTableIn(s.alias, p) })),
-  };
+  void createTableIn(p);
 }
 
 function handleColumn(handle: string | null | undefined): string | undefined {
@@ -161,12 +169,11 @@ function onConnect(connection: Connection) {
     toast('请从一个字段拖到另一个字段上来建立关系。', 'error');
     return;
   }
-  if (child.alias !== parent.alias || !child.editable || !parent.editable) {
+  if (child.source !== parent.source || !child.editable || !parent.editable) {
     toast('只能在同一个设计库的表之间建立关系；数据库中的表是只读的。', 'error');
     return;
   }
   if (child.id === parent.id && childCol === parentCol) return;
-  const alias = child.alias;
   menu.value = {
     x: pointer.x,
     y: pointer.y,
@@ -176,7 +183,6 @@ function onConnect(connection: Connection) {
       hint: k.hint,
       action: () =>
         void designOp(
-          alias,
           [{ op: 'relation.add', from: { table: child.key, columns: [childCol] }, to: { table: parent.key, columns: [parentCol] }, kind: k.kind }],
           `添加关系 ${child.key} → ${parent.key}`,
         ),
@@ -185,14 +191,14 @@ function onConnect(connection: Connection) {
 }
 
 function relatedTables(t: TableView): string[] {
-  const rels = state.sources[t.alias]?.schema?.relations ?? [];
+  const rels = state.sources[t.source]?.schema?.relations ?? [];
   const out = new Set<string>();
   for (const r of rels) {
     if (r.from.table === t.key) out.add(r.to.table);
     if (r.to.table === t.key) out.add(r.from.table);
   }
   out.delete(t.key);
-  return [...out].filter((k) => !tableView(nodeId(t.alias, k)));
+  return [...out].filter((k) => !tableView(nodeId(t.source, k)));
 }
 
 function setDisplay(ids: string[], display: ColumnDisplay | undefined) {
@@ -215,7 +221,7 @@ function openNodeMenu({ nodeId: id, x, y }: { nodeId: string; x: number; y: numb
       label: '添加关联的表',
       hint: related.length ? `${related.length} 张` : '无',
       disabled: !related.length,
-      action: () => addTables(t.alias, related, id),
+      action: () => addTables(t.source, related, id),
     },
     { separator: true },
     { label: '字段显示：全部', action: () => setDisplay(tableTargets, 'all') },
@@ -225,13 +231,24 @@ function openNodeMenu({ nodeId: id, x, y }: { nodeId: string; x: number; y: numb
     { separator: true },
     { label: targets.length > 1 ? `从画布移除 ${targets.length} 项` : '从画布移除', hint: 'Delete', action: () => removeFromCanvas(targets) },
   ];
+  if (canvas.value.zones.length) {
+    const nodeZone = canvas.value.nodes.find((n) => nodeId(n.source, n.table) === id)?.zone;
+    items.push({ separator: true });
+    for (const z of canvas.value.zones) {
+      if (z.id === nodeZone) {
+        items.push({ label: `从"${z.name}"移出`, action: () => assignToZone(tableTargets, undefined) });
+      } else {
+        items.push({ label: `放入"${z.name}"`, action: () => assignToZone(tableTargets, z.id) });
+      }
+    }
+  }
   if (t.editable) {
     items.push(
       { separator: true },
       {
         label: '从设计库中删除表…',
         danger: true,
-        action: () => void designOp(t.alias, [{ op: 'table.delete', table: t.key }], `删除表 ${t.key}`, [{ op: 'nodes.remove', ids: [id] }]),
+        action: () => void designOp([{ op: 'table.delete', table: t.key }], `删除表 ${t.key}`, [{ op: 'nodes.remove', ids: [id] }]),
       },
     );
   }
@@ -247,8 +264,7 @@ function setComparison(value: string) {
     editCanvas('关闭对比', [{ op: 'comparison.set', comparison: undefined }]);
     return;
   }
-  const [design, db] = value.split('|');
-  editCanvas('开启对比', [{ op: 'comparison.set', comparison: { design, db, mode: canvas.value.comparison?.mode ?? 'overlay' } }]);
+  editCanvas('开启对比', [{ op: 'comparison.set', comparison: { db: value, mode: canvas.value.comparison?.mode ?? 'overlay' } }]);
   rightTab.value = 'diff';
 }
 
@@ -281,6 +297,36 @@ function addNote() {
   state.selection = { type: 'note', id };
 }
 
+function addZone() {
+  const p = flow.value?.centerPosition() ?? { x: 0, y: 0 };
+  const id = `z${Date.now().toString(36)}`;
+  const taken = new Set(canvas.value.zones.map((z) => z.name));
+  let name = '分区 1';
+  for (let i = 2; taken.has(name); i++) name = `分区 ${i}`;
+  editCanvas('新建分区', [{
+    op: 'zone.put',
+    zone: { id, name, x: Math.round(p.x - 200), y: Math.round(p.y - 100), width: 400, height: 300 },
+  }]);
+  state.selection = { type: 'zone', id };
+}
+
+function removeZone(id: string) {
+  editCanvas('删除分区', [{ op: 'zone.remove', id }]);
+  if (state.selection?.type === 'zone' && state.selection.id === id) state.selection = undefined;
+}
+
+function renameZone(id: string) {
+  const zone = canvas.value.zones.find((z) => z.id === id);
+  if (!zone) return;
+  menu.value = undefined;
+  const name = prompt('分区名称', zone.name);
+  if (name && name !== zone.name) editCanvas('重命名分区', [{ op: 'zone.put', zone: { ...zone, name } }]);
+}
+
+function assignToZone(nodeIds: string[], zoneId?: string) {
+  editCanvas(zoneId ? '放入分区' : '移出分区', [{ op: 'nodes.zone', ids: nodeIds, zone: zoneId }]);
+}
+
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   return !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
@@ -297,8 +343,11 @@ function onKeyDown(e: KeyboardEvent) {
   if (ids.length) {
     e.preventDefault();
     removeFromCanvas(ids);
+  } else if (sel?.type === 'zone') {
+    e.preventDefault();
+    removeZone(sel.id);
   } else if (sel?.type === 'relation') {
-    toast('Delete 只会从画布移除节点。要删除关系，请在右侧属性面板中点击“删除关系”。');
+    toast('Delete 只会从画布移除节点。要删除关系，请在右侧属性面板中点击"删除关系"。');
   }
 }
 
@@ -359,7 +408,8 @@ onUnmounted(() => {
           @blur="commitRename"
         />
         <strong v-else class="title" :title="`${canvas.description ? `${canvas.description}\n` : ''}点击修改画布名称`" @click="startRename">{{ canvas.name }}</strong>
-        <button :disabled="!designSources.length" title="也可以双击画布空白处" @click="createTable()">+ 新建表</button>
+        <button :disabled="!hasDesignSchema" title="也可以双击画布空白处" @click="createTable()">+ 新建表</button>
+        <button class="secondary" @click="addZone">+ 分区</button>
         <button class="secondary" @click="addNote">+ 便签</button>
         <span class="sep" />
         <button class="secondary" :disabled="!view.tables.length" @click="flow?.autoLayout(false)">自动布局</button>
@@ -397,10 +447,18 @@ onUnmounted(() => {
           <SourcePanel :view="view" @add-tables="addTables" @remove-nodes="removeFromCanvas" @pick-mode="pickMode" />
         </aside>
         <section class="center-pane">
-          <CanvasView ref="flow" :view="view" :canvas="canvas" @connect="onConnect" @create-table="createTable" @node-menu="openNodeMenu" />
-          <div v-if="!canvas.sources.length" class="empty-overlay">
+          <CanvasView ref="flow" :view="view" :canvas="canvas" @connect="onConnect" @create-table="createTable" @node-menu="openNodeMenu" @rename-zone="renameZone" />
+          <div v-if="!hasDesignSchema && !dbSources.length" class="empty-overlay">
             <p>这个画布还是空的。</p>
-            <p class="muted">在左侧“数据源”里添加设计库或数据库，表就会出现在这里。</p>
+            <p class="muted">在左侧"数据源"里添加设计库或数据库，表就会出现在这里。</p>
+          </div>
+          <div v-else-if="!view.tables.length && emptyDesign" class="empty-overlay">
+            <p>设计库"{{ state.design?.name ?? 'design' }}"还没有表。</p>
+            <p class="muted">可以直接新建表，也可以先写一张 ER 图（复制给 AI 帮你写），再同步成表结构。</p>
+            <div class="empty-actions">
+              <button @click="createTable()">+ 新建表</button>
+              <button class="secondary" @click="newErDiagram()">新建 ER 图（和 AI 一起设计）</button>
+            </div>
           </div>
           <div v-else-if="!view.tables.length" class="empty-overlay">
             <p>画布上还没有表。</p>
@@ -413,10 +471,28 @@ onUnmounted(() => {
             <button :class="{ active: rightTab === 'diff' }" @click="rightTab = 'diff'">
               差异<span v-if="canvas.comparison && openDiffs" class="count">{{ openDiffs }}</span>
             </button>
+            <button :class="{ active: rightTab === 'sync' }" title="设计图（ER 图）和表结构不一致的地方" @click="rightTab = 'sync'">
+              待同步<span v-if="pendingCount" class="count">{{ pendingCount }}</span>
+            </button>
           </nav>
           <div class="tab-body">
             <Inspector v-if="rightTab === 'inspector'" />
-            <DiffPanel v-else :view="view" />
+            <DiffPanel v-else-if="rightTab === 'diff'" :view="view" />
+            <template v-else>
+              <p v-if="!state.pending.length" class="sync-empty muted">
+                {{ hasDesignSchema ? '画布上设计库的 ER 图和表结构一致，没有需要同步的内容。' : '画布上没有设计库。' }}
+              </p>
+              <SyncPanel
+                v-else
+                :groups="state.pending"
+                show-titles
+                :busy="syncBusy"
+                @apply="onApplySync"
+                @ignore="(g, ids) => ignoreSync(g, ids)"
+                @clear-ignored="(g) => ignoreSync(g, [], true)"
+                @open="openDiagram"
+              />
+            </template>
           </div>
         </aside>
       </main>
@@ -557,6 +633,18 @@ onUnmounted(() => {
   transform: translate(-50%, -50%);
   text-align: center;
   pointer-events: none;
+}
+
+.empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  pointer-events: auto;
+}
+
+.sync-empty {
+  padding: 12px;
 }
 
 .toast {

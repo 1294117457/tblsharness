@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { nodeId, parseNodeId } from '@shared/canvas';
+import { computed, ref } from 'vue';
+import { DESIGN_SOURCE, nodeId, parseNodeId } from '@shared/canvas';
 import type { ColumnPatch, RelationPatch } from '@shared/designOps';
 import type { NColumn, NRelation, NTable, RelationKind } from '@shared/model';
+import { COLUMN_TEMPLATES, columnTemplate, parseQuickColumns, quickColumnOps, type ColumnTemplate, type QuickColumn } from '@shared/quickColumns';
 import type { TblsCardinality } from '@shared/tbls';
-import { canvas, designOp, editCanvas, focusNode, state } from '../store';
+import { canvas, designOp, editCanvas, focusNode, state, toast } from '../store';
 
 const RELATION_KINDS: { value: RelationKind; label: string }[] = [
   { value: 'fk', label: '外键（数据库约束）' },
@@ -41,7 +42,7 @@ const COMMON_TYPES = [
 ];
 
 interface Target {
-  alias: string;
+  source: string;
   kind: 'design' | 'db';
   editable: boolean;
   table?: NTable;
@@ -52,17 +53,18 @@ interface Target {
 const target = computed<Target | undefined>(() => {
   const sel = state.selection;
   if (!sel || sel.type === 'note') return undefined;
-  const alias = sel.type === 'relation' ? sel.alias : parseNodeId(sel.nodeId).alias;
-  const source = canvas.value.sources.find((s) => s.alias === alias);
-  const schema = state.sources[alias]?.schema;
-  if (!source) return undefined;
-  const editable = source.kind === 'design' && !!schema;
+  const source = sel.type === 'relation' ? sel.source : parseNodeId(sel.nodeId).source;
+  const srcData = state.sources[source];
+  if (!srcData) return undefined;
+  const schema = srcData.schema;
+  const kind = source === DESIGN_SOURCE ? 'design' : 'db';
+  const editable = kind === 'design' && !!schema;
   if (sel.type === 'relation') {
-    return { alias, kind: source.kind, editable, relation: schema?.relations.find((r) => r.key === sel.key) };
+    return { source, kind, editable, relation: schema?.relations.find((r) => r.key === sel.key) };
   }
   const table = schema?.tables.find((t) => t.key === parseNodeId(sel.nodeId).table);
   const column = sel.type === 'column' ? table?.columns.find((c) => c.name === sel.column) : undefined;
-  return { alias, kind: source.kind, editable, table, column };
+  return { source, kind, editable, table, column };
 });
 
 const note = computed(() => {
@@ -73,7 +75,7 @@ const note = computed(() => {
 const tableRelations = computed(() => {
   const t = target.value;
   if (!t?.table || t.column) return [];
-  const rels = state.sources[t.alias]?.schema?.relations ?? [];
+  const rels = state.sources[t.source]?.schema?.relations ?? [];
   return rels.filter((r) => r.from.table === t.table!.key || r.to.table === t.table!.key);
 });
 
@@ -89,15 +91,15 @@ async function renameTable(to: string) {
   const t = target.value;
   to = to.trim();
   if (!t?.table || !to || to === t.table.key) return;
-  if (await designOp(t.alias, [{ op: 'table.rename', from: t.table.key, to }], `重命名表 ${t.table.key}`)) {
-    state.selection = { type: 'table', nodeId: nodeId(t.alias, to) };
+  if (await designOp([{ op: 'table.rename', from: t.table.key, to }], `重命名表 ${t.table.key}`)) {
+    state.selection = { type: 'table', nodeId: nodeId(t.source, to) };
   }
 }
 
 function updateTableComment(comment: string) {
   const t = target.value;
   if (!t?.table || comment === (t.table.comment ?? '')) return;
-  void designOp(t.alias, [{ op: 'table.update', table: t.table.key, comment }], `修改表注释 ${t.table.key}`);
+  void designOp([{ op: 'table.update', table: t.table.key, comment }], `修改表注释 ${t.table.key}`);
 }
 
 async function addColumn() {
@@ -106,15 +108,44 @@ async function addColumn() {
   const taken = new Set(t.table.columns.map((c) => c.name));
   let name = 'new_column';
   for (let i = 2; taken.has(name); i++) name = `new_column_${i}`;
-  const ok = await designOp(t.alias, [{ op: 'column.add', table: t.table.key, column: { name, type: 'varchar(255)', nullable: true } }], `添加字段 ${name}`);
-  if (ok) state.selection = { type: 'column', nodeId: nodeId(t.alias, t.table.key), column: name };
+  const ok = await designOp([{ op: 'column.add', table: t.table.key, column: { name, type: 'varchar(255)', nullable: true } }], `添加字段 ${name}`);
+  if (ok) state.selection = { type: 'column', nodeId: nodeId(t.source, t.table.key), column: name };
+}
+
+const quickText = ref('');
+const quickError = ref('');
+const driverName = computed(() => (target.value ? state.sources[target.value.source]?.schema?.driver?.name : undefined));
+
+async function addQuickColumns(columns: QuickColumn[]): Promise<boolean> {
+  const t = target.value;
+  if (!t?.table || !columns.length) return false;
+  const { ops, added, skipped } = quickColumnOps(t.table.key, t.table.columns.map((c) => c.name), columns);
+  if (!ops.length) {
+    toast(`字段 ${skipped.join(', ')} 已经存在`, 'error');
+    return false;
+  }
+  const ok = await designOp(ops, added.length > 1 ? `添加 ${added.length} 个字段` : `添加字段 ${added[0]}`);
+  if (ok && skipped.length) toast(`已跳过已存在的字段：${skipped.join(', ')}`);
+  return ok;
+}
+
+async function submitQuick() {
+  const { columns, errors } = parseQuickColumns(quickText.value);
+  quickError.value = errors.join('；');
+  if (errors.length) return;
+  if (await addQuickColumns(columns)) quickText.value = '';
+}
+
+function addTemplate(key: ColumnTemplate | 'timestamps') {
+  const keys: ColumnTemplate[] = key === 'timestamps' ? ['created_at', 'updated_at'] : [key];
+  void addQuickColumns(keys.map((k) => columnTemplate(k, driverName.value)));
 }
 
 async function updateColumn(patch: ColumnPatch, label: string) {
   const t = target.value;
   if (!t?.table || !t.column) return;
-  const ok = await designOp(t.alias, [{ op: 'column.update', table: t.table.key, column: t.column.name, patch }], label);
-  if (ok && patch.name) state.selection = { type: 'column', nodeId: nodeId(t.alias, t.table.key), column: patch.name };
+  const ok = await designOp([{ op: 'column.update', table: t.table.key, column: t.column.name, patch }], label);
+  if (ok && patch.name) state.selection = { type: 'column', nodeId: nodeId(t.source, t.table.key), column: patch.name };
 }
 
 function renameColumn(name: string) {
@@ -130,37 +161,37 @@ function moveColumn(delta: number) {
   const index = t.table.columns.findIndex((c) => c.name === t.column!.name);
   const toIndex = index + delta;
   if (toIndex < 0 || toIndex >= t.table.columns.length) return;
-  void designOp(t.alias, [{ op: 'column.move', table: t.table.key, column: t.column.name, toIndex }], `移动字段 ${t.column.name}`);
+  void designOp([{ op: 'column.move', table: t.table.key, column: t.column.name, toIndex }], `移动字段 ${t.column.name}`);
 }
 
 async function deleteColumn() {
   const t = target.value;
   if (!t?.table || !t.column) return;
   const table = t.table.key;
-  if (await designOp(t.alias, [{ op: 'column.delete', table, column: t.column.name }], `删除字段 ${t.column.name}`)) {
-    state.selection = { type: 'table', nodeId: nodeId(t.alias, table) };
+  if (await designOp([{ op: 'column.delete', table, column: t.column.name }], `删除字段 ${t.column.name}`)) {
+    state.selection = { type: 'table', nodeId: nodeId(t.source, table) };
   }
 }
 
 function updateRelation(patch: RelationPatch) {
   const t = target.value;
-  if (t?.relation) void designOp(t.alias, [{ op: 'relation.update', key: t.relation.key, patch }], '修改关系');
+  if (t?.relation) void designOp([{ op: 'relation.update', key: t.relation.key, patch }], '修改关系');
 }
 
 async function deleteRelation() {
   const t = target.value;
   if (!t?.relation) return;
-  if (await designOp(t.alias, [{ op: 'relation.delete', key: t.relation.key }], '删除关系')) state.selection = undefined;
+  if (await designOp([{ op: 'relation.delete', key: t.relation.key }], '删除关系')) state.selection = undefined;
 }
 
 function selectColumn(column: string) {
   const t = target.value;
-  if (t?.table) state.selection = { type: 'column', nodeId: nodeId(t.alias, t.table.key), column };
+  if (t?.table) state.selection = { type: 'column', nodeId: nodeId(t.source, t.table.key), column };
 }
 
 function selectRelation(r: NRelation) {
   const t = target.value;
-  if (t) state.selection = { type: 'relation', alias: t.alias, key: r.key };
+  if (t) state.selection = { type: 'relation', source: t.source, key: r.key };
 }
 
 function updateNote(text: string) {
@@ -235,7 +266,7 @@ function cardinalityLabel(c: TblsCardinality): string {
     <template v-else-if="target?.column && target.table">
       <h3>
         字段
-        <a href="#" class="crumb" @click.prevent="state.selection = { type: 'table', nodeId: nodeId(target.alias, target.table.key) }">{{ target.table.key }}</a>
+        <a href="#" class="crumb" @click.prevent="state.selection = { type: 'table', nodeId: nodeId(target.source, target.table.key) }">{{ target.table.key }}</a>
       </h3>
       <p v-if="!target.editable" class="readonly">数据库中的字段只能查看。</p>
       <label>
@@ -333,6 +364,26 @@ function cardinalityLabel(c: TblsCardinality): string {
           <span class="muted">{{ c.rawType }}{{ c.nullable ? '' : ' 非空' }}</span>
         </li>
       </ul>
+      <template v-if="target.editable">
+        <label>
+          快速添加字段（Enter 添加，Shift+Enter 换行写多个）
+          <textarea
+            v-model="quickText"
+            rows="2"
+            class="mono"
+            placeholder="email varchar(128) not null unique 登录邮箱"
+            title="格式：字段名 [类型] [not null|null|pk|unique|default 值] [注释]&#10;只写字段名时按命名猜类型：*_id → bigint，*_at → timestamp，is_* → boolean"
+            @keydown.enter.exact.prevent="submitQuick"
+            @input="quickError = ''"
+          />
+        </label>
+        <p v-if="quickError" class="quick-error">{{ quickError }}</p>
+        <div class="templates">
+          <span class="muted">常用：</span>
+          <button v-for="tpl in COLUMN_TEMPLATES" :key="tpl.key" class="secondary small" @click="addTemplate(tpl.key)">{{ tpl.label }}</button>
+          <button class="secondary small" title="created_at + updated_at" @click="addTemplate('timestamps')">时间戳</button>
+        </div>
+      </template>
       <template v-if="tableRelations.length">
         <div class="section-title"><span>关系（{{ tableRelations.length }}）</span></div>
         <ul class="columns">
@@ -343,7 +394,7 @@ function cardinalityLabel(c: TblsCardinality): string {
         </ul>
       </template>
       <div class="row-actions">
-        <button class="secondary" @click="focusNode(nodeId(target.alias, target.table.key))">在画布中定位</button>
+        <button class="secondary" @click="focusNode(nodeId(target.source, target.table.key))">在画布中定位</button>
       </div>
     </template>
 
@@ -470,5 +521,21 @@ textarea {
 
 .hint {
   padding: 4px 0;
+}
+
+.mono {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.quick-error {
+  margin: 0;
+  color: var(--hn-missing);
+}
+
+.templates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
 }
 </style>

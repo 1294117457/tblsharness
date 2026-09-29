@@ -1,9 +1,9 @@
 import { promises as nodeFs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { emptyCanvas, serializeCanvas, type CanvasFile } from '../shared/canvas';
+import type { CanvasFile } from '../shared/canvas';
 import { CONNECTION_DRIVERS } from '../shared/connection';
-import type { ComparisonPair, DesignExt } from '../shared/model';
+import type { DesignExt } from '../shared/model';
 import type { TblsSchema } from '../shared/tbls';
 import {
   DEFAULT_DB_EXCLUDE,
@@ -11,8 +11,9 @@ import {
   ID_PREFIX,
   nextSeq,
   type ComparisonsFile,
+  type ComparisonEntry,
   type DbSourceMeta,
-  type DesignSourceMeta,
+  type DesignMeta,
   type HarnessRootMeta,
   type SeqKind,
   type SourceKind,
@@ -33,17 +34,18 @@ import {
   writeYaml,
 } from './fsUtil';
 
-export const CANVAS_SUFFIX = '.canvas.json';
+export const CANVAS_SUFFIX = '.json';
+export const DIAGRAM_SUFFIX = '.md';
+const CANVAS_ID = /^canvas\d+$/;
+const DIAGRAM_ID = /^diagram\d+$/;
 
 /**
  * Everything lives outside the user's projects:
  *
  * <root>/workspaces/<ws>/
  *   workspace.yml
- *   comparisons.json
- *   design/<id>/{source.yml, schema.json, ext.json}
+ *   design/<id>/{design.yml, schema.json, ext.json, comparisons.json, diagrams/<diagramN>.md, canvases/<canvasN>.json}
  *   db/<id>/{source.yml, .tbls.yml?, snapshots/*.json}
- *   canvas/<id>.canvas.json
  */
 export class HarnessStorage {
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -83,8 +85,7 @@ export class HarnessStorage {
     }
   }
 
-  /** Creates `workspace<N>` with an empty first canvas. */
-  async createWorkspace(name: string, firstCanvasName: string): Promise<HarnessWorkspace> {
+  async createWorkspace(name: string): Promise<HarnessWorkspace> {
     await mkdirp(this.workspacesDir);
     const root = await this.readRootMeta();
     const { id, n } = await claim(ID_PREFIX.workspace, await this.workspaceIds(), root.seq.workspace, (candidate) =>
@@ -96,10 +97,7 @@ export class HarnessStorage {
     const ws = this.workspace(id);
     await mkdirp(ws.designDir);
     await mkdirp(ws.dbDir);
-    await mkdirp(ws.canvasDir);
     await ws.writeMeta({ version: 1, name, seq: {} });
-    await ws.writeComparisons({ version: 1, pairs: [] });
-    await ws.createCanvas(emptyCanvas(firstCanvasName));
     return ws;
   }
 
@@ -108,16 +106,21 @@ export class HarnessStorage {
     const rel = path.relative(this.workspacesDir.fsPath, uri.fsPath);
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
     const parts = rel.split(/[\\/]/);
-    const [workspace, area, id] = parts;
+    const [workspace, area, id, sub, file] = parts;
     if (!workspace) return undefined;
+    if (area === 'design' && id && sub === 'diagrams') {
+      const diagram = file?.endsWith(DIAGRAM_SUFFIX) ? file.slice(0, -DIAGRAM_SUFFIX.length) : undefined;
+      return { workspace, kind: 'diagram', id, diagram: diagram && DIAGRAM_ID.test(diagram) ? diagram : undefined };
+    }
+    if (area === 'design' && id && sub === 'canvases') {
+      const canvas = file?.endsWith(CANVAS_SUFFIX) ? file.slice(0, -CANVAS_SUFFIX.length) : undefined;
+      return { workspace, kind: 'canvas', id, design: id, canvas: canvas && CANVAS_ID.test(canvas) ? canvas : undefined };
+    }
+    if (area === 'design' && id && sub === 'comparisons.json') {
+      return { workspace, kind: 'comparisons', id };
+    }
     if (area === 'design' || area === 'db') {
       return id ? { workspace, kind: area, id } : { workspace };
-    }
-    if (area === 'canvas' && id?.endsWith(CANVAS_SUFFIX)) {
-      return { workspace, kind: 'canvas', id: id.slice(0, -CANVAS_SUFFIX.length) };
-    }
-    if (area === 'comparisons.json') {
-      return { workspace, kind: 'comparisons' };
     }
     return { workspace };
   }
@@ -126,31 +129,30 @@ export class HarnessStorage {
 export type Located =
   | { workspace: string; kind?: undefined; id?: undefined }
   | { workspace: string; kind: SourceKind; id: string }
-  | { workspace: string; kind: 'canvas'; id: string }
-  | { workspace: string; kind: 'comparisons'; id?: undefined };
+  /** Canvas inside a design: `design/<designN>/canvases/<canvasN>.json`. */
+  | { workspace: string; kind: 'canvas'; id: string; design: string; canvas?: string }
+  /** `id` is the design ID; `diagram` is missing for the directory itself or unrelated files in it. */
+  | { workspace: string; kind: 'diagram'; id: string; diagram?: string }
+  | { workspace: string; kind: 'comparisons'; id: string };
 
 export class HarnessWorkspace {
   readonly metaFile: vscode.Uri;
-  readonly comparisonsFile: vscode.Uri;
   readonly designDir: vscode.Uri;
   readonly dbDir: vscode.Uri;
-  readonly canvasDir: vscode.Uri;
 
   constructor(
     readonly id: string,
     readonly dir: vscode.Uri,
   ) {
     this.metaFile = vscode.Uri.joinPath(dir, 'workspace.yml');
-    this.comparisonsFile = vscode.Uri.joinPath(dir, 'comparisons.json');
     this.designDir = vscode.Uri.joinPath(dir, 'design');
     this.dbDir = vscode.Uri.joinPath(dir, 'db');
-    this.canvasDir = vscode.Uri.joinPath(dir, 'canvas');
   }
 
   async readMeta(): Promise<WorkspaceMeta> {
     const raw = await readYaml<WorkspaceMeta>(this.metaFile);
     const seq: WorkspaceMeta['seq'] = {};
-    for (const kind of ['design', 'db', 'canvas'] as SeqKind[]) {
+    for (const kind of ['design', 'db'] as SeqKind[]) {
       const n = Number(raw.seq?.[kind]);
       if (n > 0) seq[kind] = n;
     }
@@ -180,7 +182,7 @@ export class HarnessWorkspace {
     return id;
   }
 
-  async createDesign(meta: DesignSourceMeta, doc: DesignDoc): Promise<string> {
+  async createDesign(meta: DesignMeta, doc: DesignDoc): Promise<string> {
     await mkdirp(this.designDir);
     const id = await this.allocate('design', await this.designIds(), (c) => tryMkdir(this.design(c).dir));
     await this.design(id).create(meta, doc);
@@ -194,21 +196,15 @@ export class HarnessWorkspace {
     return this.db(id);
   }
 
-  async createCanvas(canvas: CanvasFile): Promise<string> {
-    await mkdirp(this.canvasDir);
-    const text = serializeCanvas(canvas);
-    return this.allocate('canvas', await this.canvasIds(), (c) => tryWriteNew(this.canvasUri(c), text));
-  }
-
-  design(id: string): DesignSource {
-    return new DesignSource(this, id);
+  design(id: string): Design {
+    return new Design(this, id);
   }
 
   db(id: string): DbSource {
     return new DbSource(this, id);
   }
 
-  source(kind: SourceKind, id: string): DesignSource | DbSource {
+  source(kind: SourceKind, id: string): Design | DbSource {
     return kind === 'design' ? this.design(id) : this.db(id);
   }
 
@@ -219,73 +215,163 @@ export class HarnessWorkspace {
   async dbIds(): Promise<string[]> {
     return listDirectories(this.dbDir);
   }
-
-  async canvasIds(): Promise<string[]> {
-    return (await listFiles(this.canvasDir, CANVAS_SUFFIX)).map((f) => f.slice(0, -CANVAS_SUFFIX.length));
-  }
-
-  canvasUri(id: string): vscode.Uri {
-    return vscode.Uri.joinPath(this.canvasDir, `${id}${CANVAS_SUFFIX}`);
-  }
-
-  async readComparisons(): Promise<ComparisonsFile> {
-    if (!(await exists(this.comparisonsFile))) return { version: 1, pairs: [] };
-    const raw = await readJson<Partial<ComparisonsFile>>(this.comparisonsFile);
-    return {
-      version: 1,
-      pairs: (raw.pairs ?? []).map((p) => ({
-        design: p.design,
-        db: p.db,
-        tableMappings: p.tableMappings ?? {},
-        acceptedDiffs: p.acceptedDiffs ?? [],
-      })),
-    };
-  }
-
-  writeComparisons(file: ComparisonsFile): Promise<void> {
-    return writeJson(this.comparisonsFile, file);
-  }
-
-  async pair(design: string, db: string): Promise<ComparisonPair> {
-    const file = await this.readComparisons();
-    return file.pairs.find((p) => p.design === design && p.db === db) ?? { design, db, tableMappings: {}, acceptedDiffs: [] };
-  }
-
-  async updatePair(design: string, db: string, update: (pair: ComparisonPair) => ComparisonPair): Promise<void> {
-    const file = await this.readComparisons();
-    const i = file.pairs.findIndex((p) => p.design === design && p.db === db);
-    const current = i >= 0 ? file.pairs[i] : { design, db, tableMappings: {}, acceptedDiffs: [] };
-    const next = update(current);
-    const pairs = i >= 0 ? file.pairs.map((p, j) => (j === i ? next : p)) : [...file.pairs, next];
-    await this.writeComparisons({ version: 1, pairs });
-  }
 }
 
-export class DesignSource {
+export class Design {
   readonly kind = 'design' as const;
   readonly dir: vscode.Uri;
   readonly metaFile: vscode.Uri;
   readonly schemaFile: vscode.Uri;
   readonly extFile: vscode.Uri;
+  readonly comparisonsFile: vscode.Uri;
 
   constructor(
     readonly workspace: HarnessWorkspace,
     readonly id: string,
   ) {
     this.dir = vscode.Uri.joinPath(workspace.designDir, id);
-    this.metaFile = vscode.Uri.joinPath(this.dir, 'source.yml');
+    this.metaFile = vscode.Uri.joinPath(this.dir, 'design.yml');
     this.schemaFile = vscode.Uri.joinPath(this.dir, 'schema.json');
     this.extFile = vscode.Uri.joinPath(this.dir, 'ext.json');
+    this.comparisonsFile = vscode.Uri.joinPath(this.dir, 'comparisons.json');
   }
 
-  async readMeta(): Promise<DesignSourceMeta> {
-    const raw = await readYaml<DesignSourceMeta>(this.metaFile);
-    return { version: 1, name: raw.name ? String(raw.name) : this.id, description: raw.description || undefined, createdFrom: raw.createdFrom };
+  async readMeta(): Promise<DesignMeta> {
+    const raw = await readYaml<DesignMeta>(this.metaFile);
+    const meta: DesignMeta = {
+      version: 1,
+      name: raw.name ? String(raw.name) : this.id,
+      description: raw.description || undefined,
+      createdFrom: raw.createdFrom,
+    };
+    if (Array.isArray(raw.sources) && raw.sources.length > 0) {
+      meta.sources = raw.sources.map(String);
+    }
+    const diagram = Number(raw.seq?.diagram);
+    const canvas = Number(raw.seq?.canvas);
+    if (diagram > 0 || canvas > 0) {
+      meta.seq = {};
+      if (diagram > 0) meta.seq.diagram = diagram;
+      if (canvas > 0) meta.seq.canvas = canvas;
+    }
+    if (raw.lastCanvas) meta.lastCanvas = String(raw.lastCanvas);
+    return meta;
   }
 
-  writeMeta(meta: DesignSourceMeta): Promise<void> {
-    return writeYaml(this.metaFile, meta);
+  /** Keeps the diagram/canvas counters when they moved on disk since `meta` was read. */
+  async writeMeta(meta: DesignMeta): Promise<void> {
+    const current = (await exists(this.metaFile)) ? await this.readMeta() : undefined;
+    const diagram = Math.max(current?.seq?.diagram ?? 0, meta.seq?.diagram ?? 0);
+    const canvas = Math.max(current?.seq?.canvas ?? 0, meta.seq?.canvas ?? 0);
+    const out: DesignMeta = { version: 1, name: meta.name };
+    if (meta.description) out.description = meta.description;
+    if (meta.createdFrom) out.createdFrom = meta.createdFrom;
+    if (meta.sources && meta.sources.length > 0) out.sources = meta.sources;
+    const seq: NonNullable<DesignMeta['seq']> = {};
+    if (canvas > 0) seq.canvas = canvas;
+    if (diagram > 0) seq.diagram = diagram;
+    if (Object.keys(seq).length > 0) out.seq = seq;
+    if (meta.lastCanvas) out.lastCanvas = meta.lastCanvas;
+    await writeYaml(this.metaFile, out);
   }
+
+  // ── Diagrams ──────────────────────────────────────────────────────
+
+  get diagramsDir(): vscode.Uri {
+    return vscode.Uri.joinPath(this.dir, 'diagrams');
+  }
+
+  diagramUri(id: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.diagramsDir, `${id}${DIAGRAM_SUFFIX}`);
+  }
+
+  async diagramIds(): Promise<string[]> {
+    const ids = (await listFiles(this.diagramsDir, DIAGRAM_SUFFIX)).map((f) => f.slice(0, -DIAGRAM_SUFFIX.length));
+    return ids.filter((id) => DIAGRAM_ID.test(id)).sort((a, b) => Number(a.slice(7)) - Number(b.slice(7)));
+  }
+
+  async readDiagramText(id: string): Promise<string> {
+    return (await readTextIfExists(this.diagramUri(id))) ?? '';
+  }
+
+  async createDiagram(text: string): Promise<string> {
+    await mkdirp(this.diagramsDir);
+    const meta = await this.readMeta();
+    const { id, n } = await claim(ID_PREFIX.diagram, await this.diagramIds(), meta.seq?.diagram, (c) => tryWriteNew(this.diagramUri(c), text));
+    const latest = await this.readMeta();
+    await this.writeMeta({ ...latest, seq: { ...latest.seq, diagram: Math.max(n, latest.seq?.diagram ?? 0) } });
+    return id;
+  }
+
+  async removeDiagram(id: string): Promise<void> {
+    await vscode.workspace.fs.delete(this.diagramUri(id), { useTrash: false });
+  }
+
+  // ── Canvases ──────────────────────────────────────────────────────
+
+  get canvasesDir(): vscode.Uri {
+    return vscode.Uri.joinPath(this.dir, 'canvases');
+  }
+
+  canvasUri(id: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.canvasesDir, `${id}${CANVAS_SUFFIX}`);
+  }
+
+  async canvasIds(): Promise<string[]> {
+    const ids = (await listFiles(this.canvasesDir, CANVAS_SUFFIX)).map((f) => f.slice(0, -CANVAS_SUFFIX.length));
+    return ids.filter((id) => CANVAS_ID.test(id)).sort((a, b) => Number(a.slice(6)) - Number(b.slice(6)));
+  }
+
+  async readCanvas(id: string): Promise<CanvasFile> {
+    return readJson<CanvasFile>(this.canvasUri(id));
+  }
+
+  async createCanvas(text: string): Promise<string> {
+    await mkdirp(this.canvasesDir);
+    const meta = await this.readMeta();
+    const { id, n } = await claim(ID_PREFIX.canvas, await this.canvasIds(), meta.seq?.canvas, (c) => tryWriteNew(this.canvasUri(c), text));
+    const latest = await this.readMeta();
+    await this.writeMeta({ ...latest, seq: { ...latest.seq, canvas: Math.max(n, latest.seq?.canvas ?? 0) } });
+    return id;
+  }
+
+  async removeCanvas(id: string): Promise<void> {
+    await vscode.workspace.fs.delete(this.canvasUri(id), { useTrash: false });
+  }
+
+  // ── Comparisons ───────────────────────────────────────────────────
+
+  async readComparisons(): Promise<ComparisonsFile> {
+    if (!(await exists(this.comparisonsFile))) return { version: 1, dbs: {} };
+    const raw = await readJson<Partial<ComparisonsFile>>(this.comparisonsFile);
+    const dbs: Record<string, ComparisonEntry> = {};
+    if (raw.dbs && typeof raw.dbs === 'object') {
+      for (const [key, val] of Object.entries(raw.dbs)) {
+        dbs[key] = {
+          tableMappings: val?.tableMappings ?? undefined,
+          acceptedDiffs: val?.acceptedDiffs ?? undefined,
+        };
+      }
+    }
+    return { version: 1, dbs };
+  }
+
+  writeComparisons(file: ComparisonsFile): Promise<void> {
+    return writeJson(this.comparisonsFile, file);
+  }
+
+  async comparisonEntry(dbId: string): Promise<ComparisonEntry> {
+    const file = await this.readComparisons();
+    return file.dbs[dbId] ?? {};
+  }
+
+  async writeComparisonEntry(dbId: string, entry: ComparisonEntry): Promise<void> {
+    const file = await this.readComparisons();
+    file.dbs[dbId] = entry;
+    return this.writeComparisons(file);
+  }
+
+  // ── Design doc (schema + ext) ─────────────────────────────────────
 
   async readDoc(): Promise<DesignDoc> {
     const schema = (await exists(this.schemaFile)) ? await readJson<TblsSchema>(this.schemaFile) : { tables: [], relations: [] };
@@ -304,7 +390,7 @@ export class DesignSource {
     return text;
   }
 
-  async create(meta: DesignSourceMeta, doc: DesignDoc): Promise<void> {
+  async create(meta: DesignMeta, doc: DesignDoc): Promise<void> {
     await mkdirp(this.dir);
     await this.writeMeta(meta);
     await this.writeDoc(doc);
@@ -402,6 +488,7 @@ export class DbSource {
     return removeRecursive(this.dir);
   }
 }
+
 
 const MAX_CLAIM_ATTEMPTS = 20;
 

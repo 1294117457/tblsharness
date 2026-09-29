@@ -20,8 +20,11 @@ export interface LoadedSource {
 
 export interface StoreChange {
   workspace?: string;
-  kind?: SourceKind | 'canvas' | 'comparisons' | 'workspace';
+  kind?: SourceKind | 'canvas' | 'comparisons' | 'workspace' | 'diagram';
   id?: string;
+  /** For canvas/diagram changes, the design they belong to. */
+  design?: string;
+  diagram?: string;
 }
 
 /** Caches normalized models per source; everything else reads through here so all views stay consistent. */
@@ -123,12 +126,13 @@ export class ModelStore implements vscode.Disposable {
   }
 
   async comparison(workspace: string, designId: string, dbId: string, snapshot?: string | null): Promise<ComparisonData | undefined> {
-    const [design, db, pair] = await Promise.all([
+    const [design, db, entry] = await Promise.all([
       this.source(workspace, 'design', designId),
       this.source(workspace, 'db', dbId, snapshot),
-      this.storage.workspace(workspace).pair(designId, dbId),
+      this.storage.workspace(workspace).design(designId).comparisonEntry(dbId),
     ]);
     if (!design.schema || !db.schema) return undefined;
+    const pair = { tableMappings: entry.tableMappings ?? {}, acceptedDiffs: entry.acceptedDiffs ?? [] };
     return { diff: diffSchemas(design.schema, db.schema, pair), tableMappings: pair.tableMappings };
   }
 
@@ -199,5 +203,7 @@ function cacheKey(workspace: string, kind: SourceKind, id: string, snapshot?: st
 
 function toChange(located: Located): StoreChange {
   if (!located.kind) return { workspace: located.workspace, kind: 'workspace' };
+  if (located.kind === 'diagram') return { workspace: located.workspace, kind: 'diagram', id: located.id, design: located.id, diagram: located.diagram };
+  if (located.kind === 'canvas') return { workspace: located.workspace, kind: 'canvas', id: located.canvas ?? located.id, design: located.design };
   return { workspace: located.workspace, kind: located.kind, id: located.id };
 }

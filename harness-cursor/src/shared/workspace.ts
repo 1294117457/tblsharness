@@ -1,9 +1,8 @@
 import type { ConnectionDriver } from './connection';
-import type { ComparisonPair } from './model';
 
 export type SourceKind = 'design' | 'db';
 
-export type SeqKind = 'design' | 'db' | 'canvas';
+export type SeqKind = 'design' | 'db';
 
 export interface WorkspaceMeta {
   version: 1;
@@ -19,12 +18,19 @@ export interface HarnessRootMeta {
   seq: { workspace?: number };
 }
 
-export interface DesignSourceMeta {
+export interface DesignMeta {
   version: 1;
   name: string;
   description?: string;
   createdFrom?: { kind: 'empty' } | { kind: 'db'; source: string; snapshot: string } | { kind: 'file'; path: string };
+  /** Database IDs referenced by this design (画布 can show their tables). */
+  sources?: string[];
+  /** Last number handed out per sub-kind inside this design. */
+  seq?: { canvas?: number; diagram?: number };
+  /** Canvas ID last opened; used to decide which canvas to open when clicking the design node. */
+  lastCanvas?: string;
 }
+
 
 export interface DbSourceMeta {
   version: 1;
@@ -41,10 +47,17 @@ export interface DbSourceMeta {
   snapshotRetention: number;
 }
 
+/** Per-design comparisons: keyed by database ID. */
 export interface ComparisonsFile {
   version: 1;
-  pairs: ComparisonPair[];
+  dbs: Record<string, ComparisonEntry>;
 }
+
+export interface ComparisonEntry {
+  tableMappings?: Record<string, string>;
+  acceptedDiffs?: string[];
+}
+
 
 export const DEFAULT_DB_EXCLUDE = [
   'pg_stat_statements',
@@ -66,7 +79,7 @@ export const DEFAULT_DB_EXCLUDE = [
 
 export const DEFAULT_SNAPSHOT_RETENTION = 10;
 
-/** Target databases offered when creating a design source; values are tbls driver names. */
+/** Target databases offered when creating a design; values are tbls driver names. */
 export const DESIGN_DRIVERS: { name: string; label: string }[] = [
   { name: 'postgres', label: 'PostgreSQL' },
   { name: 'mysql', label: 'MySQL' },
@@ -82,11 +95,12 @@ export function driverLabel(name: string | undefined): string | undefined {
   return DESIGN_DRIVERS.find((d) => d.name === name)?.label ?? name;
 }
 
-export const ID_PREFIX: Record<SeqKind | 'workspace', string> = {
+export const ID_PREFIX: Record<SeqKind | 'workspace' | 'canvas' | 'diagram', string> = {
   workspace: 'workspace',
   design: 'design',
   db: 'db',
   canvas: 'canvas',
+  diagram: 'diagram',
 };
 
 /**

@@ -1,25 +1,23 @@
 ﻿import * as vscode from 'vscode';
 import { designFromSnapshot, emptyDesignSchema, emptyExt, type DesignDoc } from '../shared/designOps';
-import { DESIGN_DRIVERS, driverLabel, nextDefaultName, type DesignSourceMeta } from '../shared/workspace';
+import { DESIGN_DRIVERS, driverLabel, nextDefaultName, type DesignMeta } from '../shared/workspace';
 import { parseTblsJson } from '../tbls/runner';
 import { readText } from '../workspace/fsUtil';
-import { canvasesReferencing, removeSourceReferences } from '../workspace/refactor';
 import type { HarnessWorkspace } from '../workspace/storage';
 import { closeTabsUnder, confirm, designNames, pickSourceId, pickWorkspace, promptName, register, required, revealInTree, type Harness } from './common';
 
-const DEFAULT_DESIGN_NAME = '设计库';
+const DEFAULT_DESIGN_NAME = '设计画布';
 
 export const LAST_DESIGN_DRIVER_KEY = 'harness.lastDesignDriver';
 
 export function registerDesignCommands(h: Harness): void {
-  /** A new design source only shows up in the tree; putting it on a canvas is a separate "添加到画布". */
-  const finish = async (ws: HarnessWorkspace, name: string, createdFrom: DesignSourceMeta['createdFrom'], doc: DesignDoc) => {
+  const finish = async (ws: HarnessWorkspace, name: string, createdFrom: DesignMeta['createdFrom'], doc: DesignDoc) => {
     const id = await ws.createDesign({ version: 1, name, createdFrom }, doc);
     h.store.invalidate({ workspace: ws.id, kind: 'design', id });
     void revealInTree(h, { kind: 'design', workspace: ws.id, id });
     const driver = driverLabel(doc.schema.driver?.name) ?? '未指定类型';
     const tables = doc.schema.tables.length ? `，${doc.schema.tables.length} 张表` : '';
-    void vscode.window.showInformationMessage(`已创建“${name}”（${driver}${tables}）。按 F2 重命名，右键可以更改数据库类型或添加到画布。`);
+    void vscode.window.showInformationMessage(`已创建"${name}"（${driver}${tables}）。按 F2 重命名，右键可以更改数据库类型。`);
   };
 
   register(h, 'harness.design.create', async (arg) => {
@@ -45,7 +43,6 @@ export function registerDesignCommands(h: Harness): void {
         ? candidates[0]
         : required(await vscode.window.showQuickPick(candidates.map((d) => ({ label: d.name, description: d.snapshot, ...d })), { title: '从哪个数据库复制？' }));
     const snapshot = await ws.db(pick.id).readSnapshot(pick.snapshot);
-    // The db display name contains the host, which must not end up in source.yml / schema.json.
     const name = nextDefaultName(DEFAULT_DESIGN_NAME, await designNames(ws));
     await finish(ws, name, { kind: 'db', source: pick.id, snapshot: pick.snapshot }, { schema: designFromSnapshot(snapshot, name), ext: emptyExt() });
   });
@@ -94,7 +91,7 @@ export function registerDesignCommands(h: Harness): void {
     const id = await pickSourceId(h, ws, 'design', arg);
     const source = ws.design(id);
     const meta = await source.readMeta();
-    await source.writeMeta({ ...meta, name: await promptName('重命名设计库', meta.name) });
+    await source.writeMeta({ ...meta, name: await promptName('重命名设计画布', meta.name) });
     h.store.invalidate({ workspace: ws.id, kind: 'design', id });
   });
 
@@ -103,13 +100,16 @@ export function registerDesignCommands(h: Harness): void {
     const id = await pickSourceId(h, ws, 'design', arg);
     const source = ws.design(id);
     const meta = await source.readMeta();
-    const canvases = await canvasesReferencing(h.storage, ws.id, 'design', id);
+    const canvasCount = (await source.canvasIds()).length;
+    const diagramCount = (await source.diagramIds()).length;
+    const parts: string[] = [];
+    if (canvasCount) parts.push(`${canvasCount} 张画布`);
+    if (diagramCount) parts.push(`${diagramCount} 张设计图`);
     await confirm(
-      `确定删除设计库“${meta.name}”吗？`,
-      `schema.json 和 ext.json 会被删除，此操作不能撤销。${canvases.length ? `\n以下画布会移除这个数据源：${canvases.join('、')}` : ''}`,
+      `确定删除设计画布"${meta.name}"吗？`,
+      `表结构${parts.length ? `、${parts.join('、')}` : ''}会被删除，此操作不能撤销。`,
       '删除',
     );
-    await removeSourceReferences(h.storage, h.canvases, ws.id, 'design', id);
     await closeTabsUnder(source.dir);
     await source.remove();
     h.store.invalidate({ workspace: ws.id, kind: 'design', id });

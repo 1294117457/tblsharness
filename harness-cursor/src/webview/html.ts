@@ -5,7 +5,7 @@ export interface WebviewHtmlOptions {
   context: vscode.ExtensionContext;
   title: string;
   /** Which app `main.ts` mounts. */
-  view?: 'canvas' | 'connection' | 'edit';
+  view?: 'canvas' | 'connection' | 'edit' | 'diagram';
 }
 
 export function webviewOptions(context: vscode.ExtensionContext): vscode.WebviewOptions {

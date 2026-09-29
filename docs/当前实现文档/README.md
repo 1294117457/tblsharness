@@ -1,7 +1,7 @@
 # Harness 工程索引（当前实现）
 
 > 面向开发者和 AI agent 的快速上手索引。先读"一分钟概览"和"目录地图"，改功能时查"改什么去哪里"。
-> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-28（M1 自动命名、M2 连接页面、"设计库"命名与数据库显示名调整后）。
+> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-28（M1 自动命名、M2 连接页面、"设计库"命名与数据库显示名调整、设计库第一阶段：设计图 / Mermaid / 同步到表结构之后）。
 
 ## 1. 一分钟概览
 
@@ -11,8 +11,9 @@ Harness 是一个 Cursor / VS Code 插件，用 **tbls 的 JSON 格式**作为�
 - **数据库（db）**：调用 `tbls out -t json` 读取真实数据库的**表结构**（不读数据），原样存成快照，只读。界面上显示为 `host:port/db`（见 4 节"数据库显示名"）。
 - **画布（canvas）**：`*.canvas.json`，只记录引用了哪些数据源、放了哪些表、坐标。表内容每次从数据源实时读取。
 - **对比（diff）**：设计库 vs 数据库快照，差异标在画布上，可"确认为有意偏差"。
+- **设计图（diagram）**：设计库下的 Mermaid 图（ER 图 / 状态图 / 时序图 / 流程图 / 数据流图），存为 `design/<designN>/diagrams/<diagramN>.md`。**AI 只写 Mermaid**；ER 图和表结构不一致时，由用户在右侧"差异/待同步"面板里勾选确认后才写入 `schema.json`，其他类型只预览不同步。
 
-侧边栏树：工作区 → 三个分组 **设计库 / 数据库 / 画布** → 表 → 字段。
+侧边栏树：工作区 → 三个分组 **设计库 / 数据库 / 画布**；设计库下分 **表结构**（→ 表 → 字段）和 **设计图**（→ 各张图）。
 
 硬性原则：
 
@@ -25,10 +26,10 @@ Harness 是一个 Cursor / VS Code 插件，用 **tbls 的 JSON 格式**作为�
 | 部分 | 技术 |
 | :-- | :-- |
 | 插件主进程 | TypeScript，esbuild 打包到 `dist/extension.js`，VS Code API ≥ 1.90 |
-| Webview | Vue 3 + Vue Flow（画布）+ elkjs（自动布局），Vite 8 构建到 `dist/webview/` |
+| Webview | Vue 3 + Vue Flow（画布）+ elkjs（自动布局）+ mermaid 12（设计图预览，按需加载），Vite 8 构建到 `dist/webview/` |
 | 外部工具 | tbls（v1.96.0 验证过），通过 `harness.tblsPath` 找到 |
 | 测试 | vitest（`test/`，只测纯函数，不依赖 vscode） |
-| 依赖 | `yaml`、`vue`、`@vue-flow/*`、`elkjs` |
+| 依赖 | `yaml`、`vue`、`@vue-flow/*`、`elkjs`、`mermaid` |
 
 **必须用 Node 22**（`.nvmrc` = `22.14.0`；老版本 Node 跑 `esbuild.mjs` 会报 `Unexpected token *`）。
 
@@ -44,7 +45,7 @@ npm run package      # 打 .vsix
 
 - F5 **Run Extension (Webview HMR)**：`preLaunchTask: dev`（esbuild watch + Vite），环境变量 `HARNESS_WEBVIEW_DEV_URL=http://localhost:5173`，Webview 从 Vite 加载，改 `webview-ui/src` 立即生效；改 `src/` 后在宿主窗口执行 `Developer: Restart Extension Host`。
 - F5 **Run Extension**：使用构建好的 `dist/webview`（生产模式）。
-- 浏览器调试：`http://localhost:5173`（画布，mock 数据）；`http://localhost:5173/?view=connection`（连接页面 mock，主机 `fail.example.test` 模拟失败，密码 `wrong` 模拟认证失败）；`http://localhost:5173/?view=edit&kind=design|workspace|canvas`（编辑页面 mock，名称填 `fail` 模拟保存失败）。
+- 浏览器调试：`http://localhost:5173`（画布，mock 数据）；`http://localhost:5173/?view=connection`（连接页面 mock，主机 `fail.example.test` 模拟失败，密码 `wrong` 模拟认证失败）；`http://localhost:5173/?view=edit&kind=design|workspace|canvas`（编辑页面 mock，名称填 `fail` 模拟保存失败）；`http://localhost:5173/?view=diagram`（设计图编辑器 mock，差异面板是写死的示例）。
 
 设置项：
 
@@ -61,6 +62,7 @@ harness-cursor/
 ├─ package.json            命令、菜单、视图、自定义编辑器、快捷键(F2)、设置 —— UI 入口全在这里声明
 ├─ esbuild.mjs             插件主进程打包
 ├─ media/db/               数据库品牌图标 <driver>-light.svg / -dark.svg（simple-icons，CC0）：postgres/mysql/mariadb/sqlite/clickhouse/redshift/sqlserver
+├─ media/spec/mermaid-design.md  "复制给 AI"时附带的设计图书写规范（ER 图写法、关系关键字等）
 ├─ .vscode/launch.json     两个 F5 配置；tasks.json 定义 dev / build 任务
 ├─ src/                    插件主进程
 │  ├─ extension.ts         activate：组装 storage/store/tree/canvases/connections，注册命令，启动存储目录文件监听
@@ -69,7 +71,12 @@ harness-cursor/
 │  │  ├─ model.ts          统一模型 NormalizedSchema/NTable/NColumn/NRelation、RelationKind、DesignExt、DiffItem/DiffResult、ComparisonPair
 │  │  ├─ workspace.ts      文件元数据类型（WorkspaceMeta/DesignSourceMeta/DbSourceMeta/HarnessRootMeta）、ID 与默认名规则（nextSeq/nextDefaultName/uniqueName）、DESIGN_DRIVERS
 │  │  ├─ canvas.ts         画布文件类型 CanvasFile、画布编辑操作 CanvasOp 与 applyCanvasEdit（纯函数）、parse/serializeCanvas
-│  │  ├─ designOps.ts      设计编辑操作 DesignOp 与 applyDesignOps（纯函数）、parseExt、designFromSnapshot、serializeDesign
+│  │  ├─ designOps.ts      设计编辑操作 DesignOp 与 applyDesignOps（纯函数）、parseExt、designFromSnapshot、serializeDesign、migrateDesignDoc（ext.modules → viewpoints）
+│  │  ├─ diagram.ts        设计图类型 DIAGRAM_TYPES、文件格式 parseDiagram / serializeDiagram（YAML frontmatter + ```mermaid 代码块）
+│  │  ├─ mermaid/er.ts     erDiagram 解析 parseErDiagram（容错、带行号）与生成 generateErDiagram（表结构 → ER 图）
+│  │  ├─ sync.ts           同步项 SyncItem / SyncGroup、collectSyncOps（校验依赖、按顺序合并 DesignOp）
+│  │  ├─ quickColumns.ts   属性面板"快速添加字段"一行语法解析、常用字段模板（按库类型选类型）
+│  │  ├─ diagramProtocol.ts  设计图编辑器 Webview ⇄ 主进程消息
 │  │  ├─ connection.ts     连接配置 ConnectionProfile、CONNECTION_DRIVERS（各库字段/端口/加密选项）、buildDsn、validateProfile、connectionLabel（显示名 host:port/db）、默认连接名、凭据序列化、遮罩
 │  │  ├─ protocol.ts       画布 Webview ⇄ 主进程消息（HostMessage / WebviewMessage）
 │  │  ├─ connectionProtocol.ts  连接页面 Webview ⇄ 主进程消息
@@ -87,15 +94,19 @@ harness-cursor/
 │  ├─ connection/
 │  │  ├─ connectionPanel.ts   连接页面（WebviewPanel）：新建/编辑连接、测试、连接后创建 db、导入 JSON
 │  │  └─ errors.ts            tbls 报错 → 中文友好提示 friendlyTblsError
+│  ├─ diagram/
+│  │  ├─ erSync.ts         computeErSync(doc, diagram)：ER 图 vs 表结构 → 同步项（新增/修改/删除表、字段、关系；外键列推断；多选项）
+│  │  ├─ diagramService.ts ★ 设计图读写（打开的文档优先）、计算待同步、prepare（按当前文本重新检测）、删除确认、编辑器内撤销、改 refs/ignored
+│  │  └─ diagramEditor.ts  设计图自定义文本编辑器（CustomTextEditorProvider，viewType harness.diagram）
 │  ├─ edit/editPanel.ts    编辑页面（WebviewPanel）：工作区/设计库/画布的名称、说明，设计库的目标数据库类型
 │  ├─ tbls/runner.ts       调用 tbls（DSN 走环境变量 TBLS_DSN，超时、取消、报错遮罩），stripDsnFromTblsConfig
 │  ├─ views/workspaceTree.ts  侧边栏树 TreeDataProvider（工作区 → 设计库/数据库/画布 → 表 → 字段），数据库品牌图标，getParent 支持 reveal
 │  ├─ commands/            命令实现（见第 7 节）
 │  │  ├─ common.ts         Harness 上下文接口、register、pickWorkspace/pickSourceId(h,…)、sourceName、designNames、revealInTree、confirm 等
-│  │  ├─ workspace.ts / design.ts / db.ts / canvas.ts
+│  │  ├─ workspace.ts / design.ts / db.ts / canvas.ts / diagram.ts（新建/打开/改名/删除设计图、复制给 AI）
 │  └─ webview/html.ts      Webview HTML（生产：dist + nonce CSP；开发：指向 Vite），<body data-view> 选择页面
 ├─ webview-ui/src/         Webview 前端（一个 bundle，两个页面）
-│  ├─ main.ts              按 data-view 挂载 App.vue（画布）/ ConnectionApp.vue（连接页面）/ EditApp.vue（编辑页面）；浏览器开发时安装对应 mock host
+│  ├─ main.ts              按 data-view 挂载 App.vue（画布）/ ConnectionApp.vue（连接页面）/ EditApp.vue（编辑页面）/ DiagramApp.vue（设计图）；浏览器开发时安装对应 mock host
 │  ├─ vscode.ts            acquireVsCodeApi 封装：post / request（带 requestId 等回复）/ onHostMessage
 │  ├─ store.ts             画布页面状态：canvas(shallowRef)、sources、catalog、comparison、selection；editCanvas / designOp / acceptDiff
 │  ├─ App.vue              画布页面外壳：工具栏（标题可点击改名）、对比选择、面板布局、快捷键
@@ -103,10 +114,12 @@ harness-cursor/
 │  ├─ canvas/layout.ts     elkjs 自动布局、新表放置
 │  ├─ components/          CanvasView(Vue Flow 画布) / TableNode / NoteNode / Inspector(属性面板，编辑表/字段/关系)
 │  │                       DiffPanel(差异列表) / SourcePanel(数据源面板，双击改名、新建) / ContextMenu
+│  │                       SyncPanel(同步项勾选列表，画布"待同步"页签和设计图编辑器共用)
+│  ├─ diagram/             DiagramApp.vue（文本 + 预览 + 差异面板）、MermaidPreview.vue（按需 import mermaid）、host.ts
 │  ├─ connection/          ConnectionApp.vue（连接页面）、DriverFields.vue（按库类型渲染字段）、form.ts、host.ts
 │  ├─ edit/                EditApp.vue（编辑页面）、host.ts
-│  └─ dev/                 mockHost.ts / mockConnectionHost.ts / mockEditHost.ts / fixtures.ts（仅开发模式，不进生产包）
-└─ test/                   canvas / connection / designOps / diff / workspace / fixtures 单元测试
+│  └─ dev/                 mockHost.ts / mockConnectionHost.ts / mockEditHost.ts / mockDiagramHost.ts / fixtures.ts（仅开发模式，不进生产包）
+└─ test/                   canvas / connection / designOps / diff / workspace / fixtures / mermaidEr / diagramSync / quickColumns 单元测试
 ```
 
 ## 4. 存储结构（磁盘上的数据）
@@ -118,9 +131,10 @@ harness-cursor/
    ├─ workspace.yml                   name, description, seq:{design,db,canvas}（各类最后发出的编号）
    ├─ comparisons.json                pairs[]: {design, db, tableMappings, acceptedDiffs}
    ├─ design/<designN>/
-   │  ├─ source.yml                   name, description, createdFrom
-   │  ├─ schema.json                  tbls 格式（可直接 tbls doc json://...）
-   │  └─ ext.json                     {version:2, relations:[{key,kind,...}], modules:[]}  tbls 表达不了的信息
+   │  ├─ source.yml                   name, description, createdFrom, seq:{diagram:N}
+   │  ├─ schema.json                  tbls 格式（可直接 tbls doc json://...）；模块存在 tbls 自带的 viewpoints 里
+   │  ├─ ext.json                     {version:2, relations:[{key,kind,...}]}  tbls 表达不了的信息（旧的 modules 读取时自动迁到 viewpoints）
+   │  └─ diagrams/<diagramN>.md       设计图：YAML frontmatter（type/name/description/refs/bind/ignored/layout）+ 一个 ```mermaid 代码块
    ├─ db/<dbN>/
    │  ├─ source.yml                   name（备用名，不含主机）, connection:{kind:'secret',driver} | {kind:'none'}, defaultSchema, include, exclude, snapshotRetention
    │  ├─ .tbls.yml                    可选，导入时已去掉 dsn
@@ -201,6 +215,17 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 - 编辑：树节点上的铅笔按钮 / 右键"编辑…" → `harness.edit` → `EditPanels.open(kind, ws, id)` 打开编辑页面（每个对象一个，重复打开只聚焦）。可以改名称和说明，设计库还能改目标数据库类型（只改 `schema.json` 的 `driver.name`，已有字段类型不转换，页面会提示）。画布已打开时通过 `transformIfOpen` 改内存中的文档。保存后关闭页面并 `invalidate`。数据库节点没有这个按钮，用"编辑连接…"。
 - 重命名：F2 → `harness.rename` 按选中节点类型转发到工作区/设计库/画布的 rename 命令；选中数据库时提示"名称来自连接信息"，并提供"编辑连接…"；画布标题点击 → `meta.set` op；数据源面板双击 → `source/rename` 消息（**只对设计库生效**，改的是设计库本身的 `source.yml`）。
 
+### 5.7 设计图与同步（设计库第一阶段）
+
+- **新建**：树上"设计图"分组的 + / 画布空状态"新建 ER 图" → `harness.diagram.create`：选类型；ER 图可以选空白 / 全部表 / 某个 viewpoint / 挑选的表（用 `generateErDiagram` 生成）→ `design.createDiagram(text)`（独占分配 `diagramN`，`source.yml` 记 `seq.diagram`）→ 用 `harness.diagram` 编辑器打开。
+- **编辑器**：`CustomTextEditorProvider`，文本文档就是数据源，AI / 用户也可以直接改 `.md` 文件（"以文本打开"）。Webview 左边 Mermaid 文本（250ms 防抖回写代码块），中间 mermaid.js 预览（`securityLevel: 'strict'`），右边"与表结构的差异"。双向回写用"上次发送的文本"去重，避免吞字。
+- **差异计算**：`DiagramService.compute` = `parseDiagram` → `parseErDiagram` → `computeErSync(designDoc, er)`。范围：图里画出的实体 + frontmatter `refs`（上次同步时图里的表）；`refs` 里有但图里没画的表才会建议删除。删除类默认不勾选；没有字段块的实体只表示"引用"，不比较字段。
+- **应用**：勾选 → `prepare`（按当前文本重新检测，id 对不上就报"设计图已经变化"）→ 有删表时模态确认 → `applyDesignOps`。从画布"待同步"页签应用时走画布的撤销栈（Ctrl+Z）；从设计图编辑器应用时，面板上有一次"撤销上次同步"（校验文件没被别处改过）。成功后把图里的表写回 `refs`。
+- **忽略**：同步项 id 稳定（如 `column.add:users.email`），"忽略"写入 frontmatter `ignored`，可以"恢复"。
+- **复制给 AI**：`harness.diagram.copyForAI` / `harness.design.copyForAI` 把 `media/spec/mermaid-design.md` + 当前内容（设计库名、库类型、图的代码或整库 ER 图）+ "我的需求"占位复制到剪贴板。**只包含模型内容，不含任何连接信息。**
+- **画布**：画布上每个设计库的 ER 图有差异时，右侧"待同步"页签显示数量（`pendingSync` 消息，文件变化后 300ms 重新计算）；设计库没有表时，空状态提供"新建表"和"新建 ER 图（和 AI 一起设计）"。
+- **快速添加字段**：属性面板表视图里一行 `email varchar(128) not null unique 登录邮箱`，多行或 `;` 分隔；常用模板 id / created_at / updated_at / deleted_at，类型按设计库的库类型选。
+
 ## 6. 消息协议速查
 
 **画布**（`src/shared/protocol.ts`）
@@ -216,6 +241,11 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 | Web→Host | `design/op` | 设计编辑（DesignOp[]，可附带 canvasEdit），需要 reply |
 | Web→Host | `diff/accept` | 确认/取消确认差异，需要 reply |
 | Web→Host | `viewport` / `db/sync` / `openRaw` / `source/create` / `source/rename` | 视口、同步、打开原始文件、新建数据源（只建不加）、改设计库名（数据库忽略） |
+| Host→Web | `pendingSync` | 画布上各设计库 ER 图的待同步项 SyncGroup[] |
+| Web→Host | `sync/apply` / `sync/ignore` | 把勾选的同步项写入表结构 / 忽略或恢复，需要 reply |
+| Web→Host | `diagram/open` / `diagram/create` | 打开设计图 / 为某个设计库新建空白 ER 图 |
+
+**设计图编辑器**（`src/shared/diagramProtocol.ts`）：Host→Web `init | doc | context | sync{group?, undo?} | reply`；Web→Host `ready | code | meta | sync/apply | sync/ignore | sync/undo | regenerate | command{copyForAI|openText|openCanvas}`。
 
 **连接页面**（`src/shared/connectionProtocol.ts`）：Web→Host `ready | test | connect | importFile | pickFile | openUrl | openTblsSettings | cancel | close`；Host→Web `init | result | filePicked`。`connect` / `importFile` 不带名称：连接用 `defaultConnectionName` 作为备用名，导入用 schema 名或文件名。
 
@@ -227,8 +257,9 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 | :-- | :-- |
 | `workspace.ts` | `workspace.create`（一键）/ `rename` / `delete` / `add`（新建…快捷菜单）、`harness.rename`（F2 分发）、`harness.edit`（树上的"编辑…"按钮，打开编辑页面）、`refresh`、`openStorage` |
 | `design.ts` | `design.create`（一键空白）/ `createBlank` / `createFromDb` / `createFromFile` / `setDriver` / `openRaw` / `openExt` / `rename` / `delete`；子菜单 `harness.design.newMenu` |
+| `diagram.ts` | `diagram.create` / `open` / `openText` / `rename` / `delete` / `copyForAI`、`design.copyForAI` |
 | `db.ts` | `db.create`（打开连接页）/ `editConnection` / `sync` / `clearConnection` / `importSnapshot` / `importTblsConfig` / `openConfig` / `openSnapshot` / `delete`（没有 rename） |
-| `canvas.ts` | `canvas.create` / `open` / `rename` / `delete`、`source.addToCanvas`、`table.revealInCanvas` |
+| `canvas.ts` | `canvas.create` / `open` / `rename` / `delete`、`source.addToCanvas`、`table.revealInCanvas`、`design.open`（打开含该设计库的画布，没有就新建一个） |
 
 命令参数统一是 `NodeArg`（`{workspace?, id?, ...}`，来自树节点或 Webview），缺省时弹选择框（`pickWorkspace` / `pickSourceId`）。
 
@@ -255,6 +286,11 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 | 连接页面 UI | `webview-ui/src/connection/*` + `dev/mockConnectionHost.ts` |
 | 编辑页面（名称、说明、设计库类型） | `src/edit/editPanel.ts` + `shared/editProtocol.ts` + `webview-ui/src/edit/*` + `dev/mockEditHost.ts` |
 | Webview CSP / 开发服务器 | `src/webview/html.ts`、`webview-ui/vite.config.mts` |
+| 设计图文件格式、新的图类型 | `shared/diagram.ts`（`DIAGRAM_TYPES`）+ `test/mermaidEr.test.ts` |
+| ER 图写法（解析/生成） | `shared/mermaid/er.ts` + `test/mermaidEr.test.ts`；AI 规范同步改 `media/spec/mermaid-design.md` |
+| ER 图 → 表结构的同步规则 | `diagram/erSync.ts` + `test/diagramSync.test.ts` |
+| 设计图编辑器 UI | `diagram/diagramEditor.ts` + `shared/diagramProtocol.ts` + `webview-ui/src/diagram/*` + `dev/mockDiagramHost.ts` |
+| 快速添加字段语法、字段模板 | `shared/quickColumns.ts` + `test/quickColumns.test.ts` |
 
 ## 9. 约定与注意事项
 
@@ -278,6 +314,9 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 | `test/workspace.test.ts` | `nextSeq` / `nextDefaultName` / `uniqueName` / ID 校验 |
 | `test/connection.test.ts` | `connectionLabel` 显示名、各库 `buildDsn`、编码、IPv6、默认加密、参数覆盖、SQLite 路径、校验、凭据序列化、遮罩、`friendlyTblsError` |
 | `test/fixtures.test.ts` | 浏览器 mock 示例数据（`webview-ui/src/dev/fixtures.ts`）能归一化，并覆盖画布要展示的各类差异 |
+| `test/mermaidEr.test.ts` | 设计图文件读写往返、erDiagram 解析（别名、键、注释、行号、错误）、表结构 → ER 图 → 解析往返 |
+| `test/diagramSync.test.ts` | ER 图同步项：新增/修改/删除、依赖、没字段块的实体、关系类型/基数、外键列推断与多选、多对多、忽略；viewpoints 迁移 |
+| `test/quickColumns.test.ts` | 快速添加字段语法、类型猜测、模板、生成 DesignOp |
 
 ## 11. 已知限制 / 待办
 
@@ -285,6 +324,7 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 - 不识别改名（显示为一边缺少一边多出）；复合外键在画布上只连第一列。
 - MCP Server（不得向 AI 暴露连接信息）、`tbls lint` 接入未做。
 - 连接页面、自动命名尚未在真实 Cursor 环境中完整走查（单元测试、typecheck、build 已通过）。
+- 设计图：表改名不会同步改图里的名字和 `refs`；不能手动把"删除 + 新增"配对成改名；编辑器内撤销只有一次、用按钮；非 ER 图不同步。详见 `docs/step2initdev/03设计库开发/第一阶段完成说明与第二阶段方案.md`。
 
 ## 12. 相关文档
 
@@ -296,3 +336,4 @@ Webview `designOp()` → `design/op`（带 requestId，等回复）→ `applyDes
 | `docs/tbls/tbls使用.md` | tbls 用法 |
 | `docs/step2initdev/01初始化/` | 阶段二：Vite HMR、工作区模型、侧边栏、画布、开发计划、实现记录 |
 | `docs/step2initdev/02新增设置/` | 自动命名（01）、连接页面（02）、tbls 能力分析（03）、开发计划（04） |
+| `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案 |

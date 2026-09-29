@@ -3,20 +3,22 @@ import { computed, nextTick, ref, shallowRef, watch } from 'vue';
 import { ConnectionMode, MarkerType, VueFlow, useVueFlow, type Connection, type Edge, type Node } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
-import { nodeId as makeNodeId, parseNodeId, type CanvasFile, type CanvasNote } from '@shared/canvas';
+import { nodeId as makeNodeId, parseNodeId, type CanvasEdit, type CanvasFile, type CanvasNote } from '@shared/canvas';
 import type { RelationKind } from '@shared/model';
-import { layoutTables, placeNewTables, type Position } from '../canvas/layout';
-import type { CanvasView, EdgeView, Mark } from '../canvas/viewModel';
+import { layoutTables, layoutWithZones, placeNewTables, type Position } from '../canvas/layout';
+import type { CanvasView, EdgeView, Mark, ZoneView } from '../canvas/viewModel';
 import { editCanvas, state } from '../store';
 import { post } from '../vscode';
 import NoteNode from './NoteNode.vue';
 import TableNode from './TableNode.vue';
+import ZoneNode from './ZoneNode.vue';
 
 const props = defineProps<{ view: CanvasView; canvas: CanvasFile }>();
 const emit = defineEmits<{
   connect: [connection: Connection];
   'create-table': [position: Position];
   'node-menu': [payload: { nodeId: string; x: number; y: number }];
+  'rename-zone': [id: string];
 }>();
 
 const FLOW_ID = 'harness-canvas';
@@ -96,6 +98,15 @@ watch(
 
 function rebuild() {
   const sel = state.selection;
+  const zoneNodes: Node[] = props.view.zones.map((z) => ({
+    id: `zone:${z.id}`,
+    type: 'zone',
+    position: { x: z.x, y: z.y },
+    data: z,
+    zIndex: -1,
+    draggable: true,
+    selected: sel?.type === 'zone' && sel.id === z.id,
+  }));
   const tableNodes: Node[] = props.view.tables.map((t) => ({
     id: t.id,
     type: 'table',
@@ -110,8 +121,8 @@ function rebuild() {
     data: n,
     selected: sel?.type === 'note' && sel.id === n.id,
   }));
-  nodes.value = [...tableNodes, ...noteNodes];
-  edges.value = props.view.edges.map((e) => toFlowEdge(e, sel?.type === 'relation' && e.alias === sel.alias && e.relationKey === sel.key));
+  nodes.value = [...zoneNodes, ...tableNodes, ...noteNodes];
+  edges.value = props.view.edges.map((e) => toFlowEdge(e, sel?.type === 'relation' && e.edgeSource === sel.source && e.relationKey === sel.key));
 }
 
 function toFlowEdge(e: EdgeView, selected: boolean): Edge {
@@ -139,22 +150,44 @@ onNodesInitialized(() => {
 });
 
 onNodeDragStop(({ nodes: moved }) => {
+  const zones = moved.filter((n) => n.type === 'zone');
   const tables = moved.filter((n) => n.type === 'table');
   const notes = moved.filter((n) => n.type === 'note');
-  const edit = [];
+  const edit: CanvasEdit = [];
+
+  for (const z of zones) {
+    const zoneId = z.id.replace('zone:', '');
+    const original = props.canvas.zones.find((cz) => cz.id === zoneId);
+    if (!original) continue;
+    const dx = z.position.x - original.x;
+    const dy = z.position.y - original.y;
+    edit.push({ op: 'zone.put' as const, zone: { ...original, x: Math.round(z.position.x), y: Math.round(z.position.y) } });
+    if (dx || dy) {
+      const memberNodes = props.canvas.nodes.filter((n) => n.zone === zoneId);
+      const movedTableIds = new Set(tables.map((t) => t.id));
+      const toMove = memberNodes.filter((n) => !movedTableIds.has(makeNodeId(n.source, n.table)));
+      if (toMove.length) {
+        edit.push({
+          op: 'nodes.put' as const,
+          nodes: toMove.map((n) => ({ source: n.source, table: n.table, x: n.x + dx, y: n.y + dy })),
+        });
+      }
+    }
+  }
+
   if (tables.length) {
     edit.push({
       op: 'nodes.put' as const,
       nodes: tables.map((n) => {
-        const { alias, table } = parseNodeId(n.id);
-        return { source: alias, table, x: n.position.x, y: n.position.y };
+        const { source, table } = parseNodeId(n.id);
+        return { source, table, x: n.position.x, y: n.position.y };
       }),
     });
   }
   for (const n of notes) {
     edit.push({ op: 'note.put' as const, note: { ...(n.data as CanvasNote), x: Math.round(n.position.x), y: Math.round(n.position.y) } });
   }
-  editCanvas(tables.length + notes.length > 1 ? '移动多个节点' : '移动节点', edit);
+  if (edit.length) editCanvas(zones.length ? '移动分区' : tables.length + notes.length > 1 ? '移动多个节点' : '移动节点', edit);
 });
 
 onConnect((connection) => emit('connect', connection));
@@ -162,11 +195,12 @@ onConnect((connection) => emit('connect', connection));
 onNodeClick(({ node }) => {
   if (node.type === 'table') state.selection = { type: 'table', nodeId: node.id };
   else if (node.type === 'note') state.selection = { type: 'note', id: (node.data as CanvasNote).id };
+  else if (node.type === 'zone') state.selection = { type: 'zone', id: (node.data as ZoneView).id };
 });
 
 onEdgeClick(({ edge }) => {
   const e = props.view.edges.find((x) => x.id === edge.id);
-  if (e?.alias && e.relationKey) state.selection = { type: 'relation', alias: e.alias, key: e.relationKey };
+  if (e?.edgeSource && e.relationKey) state.selection = { type: 'relation', source: e.edgeSource, key: e.relationKey };
 });
 
 onPaneClick(() => {
@@ -208,18 +242,37 @@ async function autoLayout(onlySelected: boolean) {
   const targets = props.view.tables.filter((t) => !onlySelected || selected.has(t.id));
   if (!targets.length) return;
   laying.value = true;
-  const positions = await layoutTables(targets, props.view.edges);
-  laying.value = false;
-  if (onlySelected) {
-    // Keep the selection where it was: anchor the new arrangement at its previous top-left corner.
-    const before = targets.map((t) => positionOf(t.id) ?? { x: 0, y: 0 });
-    const ox = Math.min(...before.map((p) => p.x));
-    const oy = Math.min(...before.map((p) => p.y));
-    for (const [id, p] of positions) positions.set(id, { x: p.x + ox, y: p.y + oy });
+
+  const hasZones = props.canvas.zones.length > 0 && !onlySelected;
+  const edit: CanvasEdit = [];
+
+  if (hasZones) {
+    const result = await layoutWithZones(targets, props.view.edges, props.canvas.nodes, props.canvas.zones);
+    laying.value = false;
+    edit.push({
+      op: 'nodes.put',
+      nodes: [...result.tables].map(([id, p]) => ({ source: parseNodeId(id).source, table: parseNodeId(id).table, x: p.x, y: p.y })),
+    });
+    for (const [zid, rect] of result.zones) {
+      const original = props.canvas.zones.find((z) => z.id === zid);
+      if (original) edit.push({ op: 'zone.put', zone: { ...original, ...rect } });
+    }
+  } else {
+    const positions = await layoutTables(targets, props.view.edges);
+    laying.value = false;
+    if (onlySelected) {
+      const before = targets.map((t) => positionOf(t.id) ?? { x: 0, y: 0 });
+      const ox = Math.min(...before.map((p) => p.x));
+      const oy = Math.min(...before.map((p) => p.y));
+      for (const [id, p] of positions) positions.set(id, { x: p.x + ox, y: p.y + oy });
+    }
+    edit.push({
+      op: 'nodes.put',
+      nodes: [...positions].map(([id, p]) => ({ source: parseNodeId(id).source, table: parseNodeId(id).table, x: p.x, y: p.y })),
+    });
   }
-  editCanvas('自动布局', [
-    { op: 'nodes.put', nodes: [...positions].map(([id, p]) => ({ source: parseNodeId(id).alias, table: parseNodeId(id).table, x: p.x, y: p.y })) },
-  ]);
+
+  editCanvas('自动布局', edit);
   if (!onlySelected) await nextTick().then(() => fitView({ padding: 0.1, duration: 300 }));
 }
 
@@ -235,6 +288,18 @@ function currentPosition(id: string): Position | undefined {
 
 function selectedNodeIds(): string[] {
   return getSelectedNodes.value.map((n) => n.id);
+}
+
+function onZoneResize({ id, width, height, dx, dy }: { id: string; width: number; height: number; dx: number; dy: number }) {
+  const original = props.canvas.zones.find((z) => z.id === id);
+  if (!original) return;
+  editCanvas('调整分区大小', [
+    { op: 'zone.put', zone: { ...original, x: original.x + dx, y: original.y + dy, width, height } },
+  ]);
+}
+
+function onRenameZone(id: string) {
+  emit('rename-zone', id);
 }
 
 defineExpose({ autoLayout, centerPosition, currentPosition, selectedNodeIds, fitView: () => fitView({ padding: 0.1, duration: 300 }) });
@@ -254,6 +319,14 @@ defineExpose({ autoLayout, centerPosition, currentPosition, selectedNodeIds, fit
       :elevate-edges-on-select="true"
       :only-render-visible-elements="view.tables.length > 100"
     >
+      <template #node-zone="nodeProps">
+        <ZoneNode
+          :data="nodeProps.data"
+          :selected="nodeProps.selected"
+          @resize="onZoneResize"
+          @rename-zone="onRenameZone"
+        />
+      </template>
       <template #node-table="nodeProps">
         <TableNode :data="nodeProps.data" :selected="nodeProps.selected" />
       </template>

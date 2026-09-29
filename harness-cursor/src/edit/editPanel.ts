@@ -8,7 +8,7 @@ import { readText, writeText } from '../workspace/fsUtil';
 import type { HarnessWorkspace } from '../workspace/storage';
 import { renderWebviewHtml, webviewOptions } from '../webview/html';
 
-const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计库', canvas: '画布' };
+const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计画布', canvas: '画布' };
 
 /** One edit page per workspace / design / canvas; opening it again just focuses it. */
 export class EditPanels implements vscode.Disposable {
@@ -16,14 +16,14 @@ export class EditPanels implements vscode.Disposable {
 
   constructor(readonly h: Harness) {}
 
-  open(kind: EditKind, ws: HarnessWorkspace, id?: string): void {
+  open(kind: EditKind, ws: HarnessWorkspace, id?: string, designId?: string): void {
     const key = `${kind}:${ws.id}:${id ?? ''}`;
     const existing = this.panels.get(key);
     if (existing) {
       existing.panel.reveal();
       return;
     }
-    const panel = new EditPanel(this.h, kind, ws, id);
+    const panel = new EditPanel(this.h, kind, ws, id, designId);
     this.panels.set(key, panel);
     panel.panel.onDidDispose(() => {
       this.panels.delete(key);
@@ -46,6 +46,7 @@ class EditPanel implements vscode.Disposable {
     private readonly kind: EditKind,
     private readonly ws: HarnessWorkspace,
     private readonly id?: string,
+    private readonly designId?: string,
   ) {
     const context = h.context;
     this.panel = vscode.window.createWebviewPanel('harness.edit', `编辑${KIND_LABEL[kind]}`, vscode.ViewColumn.Active, webviewOptions(context));
@@ -86,7 +87,8 @@ class EditPanel implements vscode.Disposable {
   }
 
   private get canvasUri(): vscode.Uri {
-    return this.ws.canvasUri(this.id!);
+    const did = this.designId ?? this.id!;
+    return this.ws.design(did).canvasUri(this.id!);
   }
 
   private async readCanvas(): Promise<CanvasFile> {
@@ -138,7 +140,7 @@ class EditPanel implements vscode.Disposable {
           const next = update(current);
           if (next !== current) await writeText(this.canvasUri, serializeCanvas(next));
         }
-        this.h.store.invalidate({ workspace: this.ws.id, kind: 'canvas', id: this.id });
+        this.h.store.invalidate({ workspace: this.ws.id, kind: 'canvas', id: this.id, design: this.designId });
         return;
       }
       case 'design': {

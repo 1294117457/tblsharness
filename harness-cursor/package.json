@@ -108,6 +108,50 @@
         "category": "Harness"
       },
       {
+        "command": "harness.design.open",
+        "title": "打开表结构（ER 画布）",
+        "category": "Harness",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "harness.design.copyForAI",
+        "title": "复制给 AI（格式说明 + 表结构）",
+        "category": "Harness",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "harness.diagram.create",
+        "title": "新建设计图…",
+        "category": "Harness",
+        "icon": "$(add)"
+      },
+      {
+        "command": "harness.diagram.open",
+        "title": "打开设计图",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.diagram.openText",
+        "title": "以文本打开",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.diagram.copyForAI",
+        "title": "复制给 AI",
+        "category": "Harness",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "harness.diagram.rename",
+        "title": "重命名设计图",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.diagram.delete",
+        "title": "删除设计图",
+        "category": "Harness"
+      },
+      {
         "command": "harness.db.create",
         "title": "添加数据库",
         "category": "Harness",
@@ -221,6 +265,16 @@
           }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "harness.diagram",
+        "displayName": "Harness 设计图",
+        "selector": [
+          {
+            "filenamePattern": "**/diagrams/diagram*.md"
+          }
+        ],
+        "priority": "option"
       }
     ],
     "submenus": [
@@ -340,14 +394,69 @@
           "group": "1_open@1"
         },
         {
+          "command": "harness.design.open",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "group": "1_open@0"
+        },
+        {
           "command": "harness.design.openRaw",
-          "when": "view == harness.workspaces && viewItem == design",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
           "group": "1_open@2"
         },
         {
           "command": "harness.design.openExt",
-          "when": "view == harness.workspaces && viewItem == design",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
           "group": "1_open@3"
+        },
+        {
+          "command": "harness.design.copyForAI",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "group": "1_open@4"
+        },
+        {
+          "command": "harness.design.open",
+          "when": "view == harness.workspaces && viewItem == designTables",
+          "group": "inline"
+        },
+        {
+          "command": "harness.diagram.create",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|diagramGroup)$/",
+          "group": "2_edit@0"
+        },
+        {
+          "command": "harness.diagram.create",
+          "when": "view == harness.workspaces && viewItem == diagramGroup",
+          "group": "inline"
+        },
+        {
+          "command": "harness.diagram.copyForAI",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "inline"
+        },
+        {
+          "command": "harness.diagram.open",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "1_open@1"
+        },
+        {
+          "command": "harness.diagram.openText",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "1_open@2"
+        },
+        {
+          "command": "harness.diagram.copyForAI",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "1_open@3"
+        },
+        {
+          "command": "harness.diagram.rename",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "9_manage@1"
+        },
+        {
+          "command": "harness.diagram.delete",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "9_manage@2"
         },
         {
           "command": "harness.design.setDriver",
@@ -508,6 +617,7 @@
     "@vue-flow/controls": "^1.1.3",
     "@vue-flow/core": "^1.48.2",
     "elkjs": "^0.12.0",
+    "mermaid": "^12.0.0",
     "vue": "^3.5.43",
     "yaml": "^2.9.1"
   },

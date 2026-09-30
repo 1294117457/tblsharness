@@ -2,9 +2,9 @@
 import type { PartitionView } from '../canvas/viewModel';
 import { PART_HEADER } from '../canvas/layout';
 
-defineProps<{ data: PartitionView; selected?: boolean; dropTarget?: boolean }>();
+defineProps<{ data: PartitionView; selected?: boolean; current?: boolean; dropTarget?: boolean }>();
 const emit = defineEmits<{
-  enter: [id: string];
+  focus: [id: string];
   toggle: [id: string];
 }>();
 </script>
@@ -12,15 +12,15 @@ const emit = defineEmits<{
 <template>
   <div
     class="partition"
-    :class="{ selected, collapsed: data.collapsed, 'drop-target': dropTarget, [`depth-${Math.min(data.depth, 4)}`]: true }"
+    :class="{ selected, current, collapsed: data.collapsed, 'drop-target': dropTarget, [`depth-${Math.min(data.depth, 4)}`]: true }"
     :style="{ width: `${data.width}px`, height: `${data.height}px` }"
   >
-    <div class="header" :style="{ height: `${PART_HEADER}px` }" :title="data.description ? `${data.name}\n${data.description}` : `${data.name}（双击标题进入）`" @dblclick.stop="emit('enter', data.id)">
+    <div class="header" :style="{ height: `${PART_HEADER}px` }" :title="data.description ? `${data.name}\n${data.description}` : `${data.name}（双击标题聚焦）`">
       <button class="twisty nodrag" :title="data.collapsed ? '展开' : '折叠'" @click.stop="emit('toggle', data.id)" @dblclick.stop>{{ data.collapsed ? '▸' : '▾' }}</button>
       <span class="name">{{ data.name }}</span>
       <span v-if="data.namespace" class="ns" :title="data.namespaceInherited ? '命名空间（继承自上级分区画布）' : '命名空间'">{{ data.namespace }}{{ data.namespaceInherited ? '（继承）' : '' }}</span>
       <span class="counts">{{ data.counts.tables }} 表 · {{ data.counts.diagrams }} 图<template v-if="data.counts.partitions"> · {{ data.counts.partitions }} 分区</template></span>
-      <button class="enter nodrag" title="进入这个分区画布" @click.stop="emit('enter', data.id)" @dblclick.stop>↗</button>
+      <button class="focus nodrag" title="聚焦：缩放视图到这个分区画布（F）" @click.stop="emit('focus', data.id)" @dblclick.stop>⤢</button>
     </div>
   </div>
 </template>
@@ -48,6 +48,12 @@ const emit = defineEmits<{
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--part-color) 30%, transparent);
 }
 
+/* The current level: where creating and pasting go. */
+.partition.current:not(.collapsed) {
+  border-style: solid;
+  background: color-mix(in srgb, var(--part-color) 9%, transparent);
+}
+
 .partition.drop-target {
   border-style: solid;
   border-width: 2px;
@@ -71,18 +77,23 @@ const emit = defineEmits<{
 }
 
 .twisty,
-.enter {
+.focus {
   padding: 0 4px;
   color: inherit;
   background: transparent;
 }
 
-.enter {
-  opacity: 0.6;
+.focus {
+  opacity: 0;
 }
 
-.enter:hover {
-  opacity: 1;
+.header:hover .focus,
+.partition.selected .focus {
+  opacity: 0.7;
+}
+
+.focus:hover {
+  opacity: 1 !important;
 }
 
 .name {

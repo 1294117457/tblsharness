@@ -48,14 +48,14 @@ export async function layoutTables(tables: TableView[], edges: EdgeView[]): Prom
 }
 
 /**
- * Lays out the level being shown with every expanded partition frame as an ELK compound node.
- * Keys are Vue Flow node IDs; positions are relative to the frame each item sits in.
+ * Lays out the whole canvas, or only the inside of the `within` frame, with every expanded
+ * partition frame as an ELK compound node. Keys are Vue Flow node IDs; positions are relative
+ * to the frame each item sits in. The `within` frame itself does not move.
  */
-export async function layoutLevel(view: CanvasView): Promise<Map<string, Position>> {
+export async function layoutLevel(view: CanvasView, within?: string): Promise<Map<string, Position>> {
   const childrenOf = new Map<string | undefined, ElkNode[]>();
   const push = (level: string | undefined, node: ElkNode) => {
-    const key = level === view.scope ? undefined : level;
-    childrenOf.set(key, [...(childrenOf.get(key) ?? []), node]);
+    childrenOf.set(level, [...(childrenOf.get(level) ?? []), node]);
   };
   for (const t of view.tables) push(t.partition, { id: t.id, width: NODE_WIDTH, height: nodeHeight(t) });
   for (const d of view.diagrams) push(d.partition, { id: `diagram:${d.id}`, width: d.width, height: d.height });
@@ -70,9 +70,9 @@ export async function layoutLevel(view: CanvasView): Promise<Map<string, Positio
             layoutOptions: { ...LAYOUT_OPTIONS, 'elk.padding': `[top=${PART_HEADER + PART_PAD / 2},left=${PART_PAD},bottom=${PART_PAD},right=${PART_PAD}]` },
             children: kids,
           };
-    push(p.parent ?? view.scope, node);
+    push(p.parent, node);
   }
-  const roots = childrenOf.get(undefined) ?? [];
+  const roots = childrenOf.get(within) ?? [];
   if (!roots.length) return new Map();
   const ids = new Set(view.tables.map((t) => t.id));
   const graph = await elk.layout({
@@ -89,6 +89,12 @@ export async function layoutLevel(view: CanvasView): Promise<Map<string, Positio
     }
   };
   collect(graph.children);
+  if (within) {
+    for (const n of graph.children ?? []) {
+      const p = out.get(n.id)!;
+      out.set(n.id, { x: p.x + PART_PAD, y: p.y + PART_HEADER + PART_PAD / 2 });
+    }
+  }
   return out;
 }
 

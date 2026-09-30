@@ -46,6 +46,13 @@ export interface ComparisonData {
   tableMappings: Record<string, string>;
 }
 
+export interface RevealTarget {
+  item?: ItemRef;
+  column?: string;
+  /** Diagrams: focus the Mermaid text in the side panel. */
+  edit?: boolean;
+}
+
 export interface ClipboardInfo {
   mode: ClipboardMode;
   count: number;
@@ -60,7 +67,6 @@ export type HostMessage =
       diagrams: DiagramData[];
       catalog?: WorkspaceCatalog;
       comparison?: ComparisonData;
-      scope?: string;
       clipboard?: ClipboardInfo;
       error?: string;
     }
@@ -71,9 +77,8 @@ export type HostMessage =
   | { type: 'comparison'; comparison?: ComparisonData }
   | { type: 'catalog'; catalog: WorkspaceCatalog }
   | { type: 'reply'; requestId: string; ok: boolean; error?: string; message?: string }
-  | { type: 'focus'; source: string; table: string; column?: string }
-  /** Switch the editor to a level; `undefined` is the root canvas. */
-  | { type: 'scope'; scope?: string; focus?: ItemRef }
+  /** Select an item and zoom the canvas to it; without `item`, fit the whole canvas. `edit` puts the cursor in its editor. */
+  | { type: 'reveal'; target: RevealTarget }
   | { type: 'clipboard'; clipboard?: ClipboardInfo }
   | { type: 'pendingSync'; groups: SyncGroup[] };
 
@@ -82,7 +87,7 @@ export type WebviewMessage =
   | { type: 'canvas/edit'; label: string; edit: CanvasEdit }
   | { type: 'design/op'; requestId: string; ops: DesignOp[]; label: string; canvasEdit?: CanvasEdit }
   | { type: 'diff/accept'; requestId: string; id: string; accepted: boolean }
-  | { type: 'viewport'; scope: string; viewport: Viewport }
+  | { type: 'viewport'; viewport: Viewport }
   | { type: 'db/sync'; source: string }
   | { type: 'openRaw'; source: string }
   /** Add a database from the workspace to this design's sources. */
@@ -94,8 +99,13 @@ export type WebviewMessage =
   | { type: 'table/copyToDesign'; requestId: string; source: string; tables: string[]; partition?: string; at?: Position }
   | { type: 'sync/apply'; requestId: string; diagram: string; ids: string[]; choices: Record<string, string> }
   | { type: 'sync/ignore'; requestId: string; diagram: string; ids: string[]; clear?: boolean }
-  | { type: 'diagram/open'; diagram: string }
+  /** Opens the diagram in its own editor tab. */
+  | { type: 'diagram/openInTab'; diagram: string }
   | { type: 'diagram/create'; partition?: string; at?: Position; diagramType?: DiagramType }
+  /** Mermaid text typed in the side panel; written straight to the diagram file (not the canvas undo stack). */
+  | { type: 'diagram/code'; diagram: string; code: string }
+  | { type: 'diagram/meta'; diagram: string; name?: string; description?: string }
+  | { type: 'diagram/copyForAI'; diagram: string }
   | { type: 'diagram/delete'; requestId: string; diagram: string }
   | { type: 'clipboard/set'; mode: ClipboardMode; items: ItemRef[] }
   | { type: 'clipboard/paste'; requestId: string; partition?: string; at?: Position; positions?: Record<string, Position> }
@@ -103,5 +113,5 @@ export type WebviewMessage =
   | { type: 'partition/namespace'; id: string }
   /** Dragging items into or out of a partition frame; coordinates are relative to the target frame. */
   | { type: 'items/move'; requestId: string; items: MoveItem[] }
-  /** The level the user is looking at; the tree follows it. */
-  | { type: 'scope'; scope?: string };
+  /** The current level (from selection / focus); the tree follows it. */
+  | { type: 'level'; level?: string };

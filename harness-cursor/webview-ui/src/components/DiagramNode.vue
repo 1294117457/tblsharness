@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { diagramTypeLabel } from '@shared/diagram';
 import type { DiagramView } from '../canvas/viewModel';
 import MermaidPreview from '../diagram/MermaidPreview.vue';
+import FocusButton from './FocusButton.vue';
 
 const MIN_WIDTH = 200;
 const MIN_HEIGHT = 120;
@@ -50,7 +51,7 @@ function onResizeEnd() {
     class="diagram-card"
     :class="{ selected }"
     :style="{ width: `${draft?.width ?? data.width}px`, height: `${draft?.height ?? data.height}px` }"
-    title="双击打开设计图编辑器"
+    title="双击编辑 Mermaid 文本（在右侧面板）"
   >
     <div class="header">
       <span class="name">{{ data.name }}</span>
@@ -58,6 +59,7 @@ function onResizeEnd() {
       <button v-if="data.pending" class="pending nodrag" title="ER 图和表结构不一致，点击查看待同步内容" @click.stop="emit('pending', data.id)" @dblclick.stop>
         待同步 {{ data.pending }}
       </button>
+      <FocusButton v-if="selected" class="focus" :item="{ kind: 'diagram', id: data.id }" />
     </div>
     <div class="body">
       <MermaidPreview :code="data.code" compact />
@@ -115,6 +117,14 @@ function onResizeEnd() {
   background: var(--hn-mismatch);
   color: var(--hn-bg);
   font-size: 11px;
+}
+
+.pending + .focus {
+  margin-left: 0;
+}
+
+.focus {
+  margin-left: auto;
 }
 
 .body {

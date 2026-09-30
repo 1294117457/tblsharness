@@ -5,9 +5,9 @@ import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import { nodeId as makeNodeId, parseNodeId, partitionSubtree, type CanvasEdit, type CanvasFile, type MoveItem } from '@shared/canvas';
 import type { RelationKind } from '@shared/model';
-import { layoutLevel, layoutTables, placeNewTables, NODE_WIDTH, PART_HEADER, type Position } from '../canvas/layout';
+import { layoutLevel, layoutTables, nodeHeight, placeNewTables, NODE_WIDTH, NOTE_HEIGHT, PART_HEADER, type Position } from '../canvas/layout';
 import type { CanvasView, EdgeView, Mark } from '../canvas/viewModel';
-import { editCanvas, itemOfFlowId, moveItems, scopeKey, state, viewports } from '../store';
+import { editCanvas, focusItems, itemOfFlowId, moveItems, requestDiagramEdit, savedViewport, select, setLevel, state } from '../store';
 import { post } from '../vscode';
 import DiagramNode from './DiagramNode.vue';
 import NoteNode from './NoteNode.vue';
@@ -17,15 +17,16 @@ import TableNode from './TableNode.vue';
 const props = defineProps<{ view: CanvasView; canvas: CanvasFile }>();
 const emit = defineEmits<{
   connect: [connection: Connection];
-  /** `partition` is the level to create in; the position is relative to it. */
-  'create-table': [partition: string | undefined, position: Position];
   'node-menu': [payload: { id: string; x: number; y: number; flow: Position }];
   'pane-menu': [payload: { x: number; y: number; flow: Position }];
-  enter: [partition: string];
   pending: [diagram: string];
+  'resize-partition': [payload: { id: string; width: number; height: number }];
 }>();
 
 const FLOW_ID = 'harness-canvas';
+/** Zooming in to a single small table beyond this makes it fill the screen. */
+const FOCUS_MAX_ZOOM = 1.5;
+const MIN_ZOOM = 0.05;
 const {
   fitView,
   setViewport,
@@ -91,7 +92,48 @@ function levelOf(id: string): string | undefined {
 }
 
 function parentNodeOf(level: string | undefined): string | undefined {
-  return level === props.view.scope || level === undefined ? undefined : `part:${level}`;
+  return level === undefined ? undefined : `part:${level}`;
+}
+
+/** Size of an item from the view data; rendered sizes are unavailable for off-screen nodes. */
+function sizeOf(id: string): { w: number; h: number } | undefined {
+  const ref = itemOfFlowId(id);
+  switch (ref.kind) {
+    case 'table': {
+      const t = props.view.tables.find((x) => x.id === id);
+      return t && { w: NODE_WIDTH, h: nodeHeight(t) };
+    }
+    case 'diagram': {
+      const d = props.view.diagrams.find((x) => x.id === ref.id);
+      return d && { w: d.width, h: d.height };
+    }
+    case 'note': {
+      const n = props.view.notes.find((x) => x.id === ref.id);
+      return n && { w: n.width, h: NOTE_HEIGHT };
+    }
+    case 'partition': {
+      const p = props.view.partitions.find((x) => x.id === ref.id);
+      return p && { w: p.width, h: p.height };
+    }
+  }
+}
+
+/** Absolute box of an item on the canvas, from the view data. */
+function boxOf(id: string): { x: number; y: number; w: number; h: number } | undefined {
+  const size = sizeOf(id);
+  const p = positionOf(id);
+  if (!size || !p) return undefined;
+  let x = p.x;
+  let y = p.y;
+  const seen = new Set<string>();
+  for (let level = levelOf(id); level && !seen.has(level); level = props.canvas.partitions.find((q) => q.id === level)?.parent) {
+    seen.add(level);
+    const frame = props.canvas.partitions.find((q) => q.id === level);
+    if (!frame) break;
+    x += frame.x;
+    y += frame.y;
+  }
+  return { x, y, ...size };
 }
 
 const KIND_DASH: Record<RelationKind | 'mapping', string | undefined> = {
@@ -111,15 +153,14 @@ const MARK_COLOR: Record<Mark, string> = {
   accepted: 'var(--hn-muted)',
 };
 
-/** Items at the level being shown that already have a position, for placing implicit ones next to them. */
+/** Root items that already have a position, for placing implicit ones (always at the root) next to them. */
 function levelBoxes(): { x: number; y: number; w: number }[] {
-  const scope = props.view.scope;
   const out: { x: number; y: number; w: number }[] = [];
   for (const t of props.view.tables) {
-    const p = t.partition === scope ? positionOf(t.id) : undefined;
+    const p = !t.partition ? positionOf(t.id) : undefined;
     if (p) out.push({ ...p, w: NODE_WIDTH });
   }
-  for (const d of props.view.diagrams) if (d.partition === scope && !d.implicit) out.push({ x: d.x, y: d.y, w: d.width });
+  for (const d of props.view.diagrams) if (!d.partition && !d.implicit) out.push({ x: d.x, y: d.y, w: d.width });
   for (const p of props.view.partitions) if (!p.parent) out.push({ x: p.x, y: p.y, w: p.width });
   return out;
 }
@@ -158,16 +199,29 @@ watch(
   () => rebuild(),
 );
 
+/** Nodes to select on the next rebuild, from a paste or a reveal. */
+let requested: Set<string> | undefined;
+watch(
+  () => state.selectRequest?.seq,
+  () => {
+    requested = new Set(state.selectRequest?.nodeIds ?? []);
+    rebuild();
+  },
+);
+
 function rebuild() {
   const sel = state.selection;
+  // A box or Ctrl selection of several nodes lives only in Vue Flow; keep it across rebuilds.
+  const flowSelected = new Set(getSelectedNodes.value.map((n) => n.id));
+  const multi = requested ?? (flowSelected.size > 1 ? flowSelected : undefined);
+  const isSelected = (id: string, single: boolean) => (multi ? multi.has(id) : single);
   const partNodes: Node[] = props.view.partitions.map((p) => ({
     id: `part:${p.id}`,
     type: 'partition',
     position: { x: p.x, y: p.y },
     data: p,
     parentNode: p.parent ? `part:${p.parent}` : undefined,
-    selected: sel?.type === 'partition' && sel.id === p.id,
-    dragHandle: '.header',
+    selected: isSelected(`part:${p.id}`, sel?.type === 'partition' && sel.id === p.id),
   }));
   const tableNodes: Node[] = props.view.tables.map((t) => ({
     id: t.id,
@@ -175,7 +229,7 @@ function rebuild() {
     position: positionOf(t.id) ?? { x: 0, y: 0 },
     data: t,
     parentNode: parentNodeOf(t.partition),
-    selected: (sel?.type === 'table' || sel?.type === 'column') && sel.nodeId === t.id,
+    selected: isSelected(t.id, (sel?.type === 'table' || sel?.type === 'column') && sel.nodeId === t.id),
   }));
   const diagramNodes: Node[] = props.view.diagrams.map((d) => ({
     id: `diagram:${d.id}`,
@@ -183,7 +237,7 @@ function rebuild() {
     position: positionOf(`diagram:${d.id}`) ?? { x: 0, y: 0 },
     data: d,
     parentNode: parentNodeOf(d.partition),
-    selected: sel?.type === 'diagram' && sel.id === d.id,
+    selected: isSelected(`diagram:${d.id}`, sel?.type === 'diagram' && sel.id === d.id),
   }));
   const noteNodes: Node[] = props.view.notes.map((n) => ({
     id: `note:${n.id}`,
@@ -191,9 +245,11 @@ function rebuild() {
     position: { x: n.x, y: n.y },
     data: n,
     parentNode: parentNodeOf(n.partition),
-    selected: sel?.type === 'note' && sel.id === n.id,
+    selected: isSelected(`note:${n.id}`, sel?.type === 'note' && sel.id === n.id),
   }));
   nodes.value = [...partNodes, ...tableNodes, ...diagramNodes, ...noteNodes];
+  // The request may come before the view that contains the new nodes; keep it until they exist.
+  if (requested && [...requested].every((id) => nodes.value.some((n) => n.id === id))) requested = undefined;
   edges.value = props.view.edges.map((e) => toFlowEdge(e, sel?.type === 'relation' && e.edgeSource === sel.source && e.relationKey === sel.key));
 }
 
@@ -214,43 +270,71 @@ function toFlowEdge(e: EdgeView, selected: boolean): Edge {
   };
 }
 
-// ── Viewport per level ─────────────────────────────────────────────
+// ── Viewport and focus ─────────────────────────────────────────────
 
+/** A reveal that arrives with the first render wins over the saved viewport. */
 let viewportPending = true;
 function applyViewport() {
   if (!viewportPending) return;
   viewportPending = false;
-  const vp = viewports.get(scopeKey(props.view.scope));
+  const vp = savedViewport.value;
   if (vp) void setViewport(vp);
   else void fitView({ padding: 0.1 });
 }
 
 onNodesInitialized(() => applyViewport());
 
-watch(
-  () => state.scopeSeq,
-  async () => {
-    viewportPending = true;
-    rebuild();
-    await nextTick();
-    setTimeout(applyViewport, 80);
-  },
-);
-
 let viewportTimer: ReturnType<typeof setTimeout> | undefined;
 onMoveEnd(({ flowTransform }) => {
   clearTimeout(viewportTimer);
-  const scope = scopeKey(props.view.scope);
   const viewport = { x: flowTransform.x, y: flowTransform.y, zoom: flowTransform.zoom };
-  viewports.set(scope, viewport);
-  viewportTimer = setTimeout(() => post({ type: 'viewport', scope, viewport }), 400);
+  viewportTimer = setTimeout(() => post({ type: 'viewport', viewport }), 400);
 });
+
+const container = ref<HTMLElement>();
+
+/** Fits the viewport to nodes (all of them when empty), never zooming in beyond {@link FOCUS_MAX_ZOOM}. */
+function focusOn(ids: string[]) {
+  const all = ids.length ? ids : [...props.view.partitions.filter((p) => !p.parent).map((p) => `part:${p.id}`), ...rootItemIds()];
+  const boxes = all.map(boxOf).filter((b): b is NonNullable<typeof b> => !!b);
+  const rect = container.value?.getBoundingClientRect();
+  if (!boxes.length || !rect?.width || !rect.height) return;
+  const x0 = Math.min(...boxes.map((b) => b.x));
+  const y0 = Math.min(...boxes.map((b) => b.y));
+  const x1 = Math.max(...boxes.map((b) => b.x + b.w));
+  const y1 = Math.max(...boxes.map((b) => b.y + b.h));
+  const pad = 0.12;
+  const zoom = Math.min(FOCUS_MAX_ZOOM, Math.max(MIN_ZOOM, Math.min((rect.width * (1 - 2 * pad)) / (x1 - x0 || 1), (rect.height * (1 - 2 * pad)) / (y1 - y0 || 1))));
+  viewportPending = false;
+  void setViewport({ x: rect.width / 2 - ((x0 + x1) / 2) * zoom, y: rect.height / 2 - ((y0 + y1) / 2) * zoom, zoom }, { duration: 300 });
+}
+
+function rootItemIds(): string[] {
+  return [
+    ...props.view.tables.filter((t) => !t.partition).map((t) => t.id),
+    ...props.view.diagrams.filter((d) => !d.partition).map((d) => `diagram:${d.id}`),
+    ...props.view.notes.filter((n) => !n.partition).map((n) => `note:${n.id}`),
+  ];
+}
+
+watch(
+  () => state.focus?.seq,
+  async () => {
+    const f = state.focus;
+    if (!f) return;
+    viewportPending = false;
+    // Let a just-expanded frame or just-shown card reach the view first.
+    await nextTick();
+    setTimeout(() => focusOn(f.nodeIds), 60);
+  },
+);
 
 // ── Dragging into and out of partition frames ─────────────────────
 
 function absRect(id: string): { x: number; y: number; w: number; h: number } | undefined {
   const n = findNode(id);
   if (!n) return undefined;
+  if (!n.dimensions.width) return boxOf(id);
   return { x: n.computedPosition.x, y: n.computedPosition.y, w: n.dimensions.width, h: n.dimensions.height };
 }
 
@@ -270,15 +354,23 @@ function frameAt(point: Position, exclude: Set<string> = new Set()): string | un
   return best;
 }
 
-/** Converts an absolute flow point to coordinates inside a level (the level shown uses absolute ones). */
+/** Converts an absolute flow point to coordinates inside a level (the root uses absolute ones). */
 function relativeTo(level: string | undefined, point: Position): Position {
-  if (level === props.view.scope || !level) return point;
+  if (!level) return point;
   const r = absRect(`part:${level}`);
   return r ? { x: point.x - r.x, y: point.y - r.y } : point;
 }
 
+/** Whether an absolute flow point lies inside a level's area; the root is unbounded. */
+function insideLevel(level: string | undefined, point: Position): boolean {
+  if (!level) return true;
+  if (props.view.partitions.find((p) => p.id === level)?.collapsed) return false;
+  const r = absRect(`part:${level}`);
+  return !!r && point.x >= r.x && point.x <= r.x + r.w && point.y >= r.y + PART_HEADER && point.y <= r.y + r.h;
+}
+
 function clampInFrame(level: string | undefined, p: Position): Position {
-  if (level === props.view.scope || !level) return { x: Math.round(p.x), y: Math.round(p.y) };
+  if (!level) return { x: Math.round(p.x), y: Math.round(p.y) };
   return { x: Math.round(Math.max(8, p.x)), y: Math.round(Math.max(PART_HEADER + 4, p.y)) };
 }
 
@@ -313,7 +405,7 @@ onNodeDragStop(async ({ nodes: moved }) => {
     if (covered) continue;
     const ref = itemOfFlowId(n.id);
     const current = levelOf(n.id);
-    const target = frameAt(centerOf(graph), excludedFor(graph)) ?? props.view.scope;
+    const target = frameAt(centerOf(graph), excludedFor(graph));
     if (target === current || (target === undefined && current === undefined)) {
       const p = clampInFrame(current, graph.position);
       switch (ref.kind) {
@@ -352,19 +444,21 @@ onNodeDragStop(async ({ nodes: moved }) => {
 onConnect((connection) => emit('connect', connection));
 
 onNodeClick(({ node }) => {
+  requested = undefined;
   const ref = itemOfFlowId(node.id);
-  if (ref.kind === 'table') state.selection = { type: 'table', nodeId: node.id };
-  else state.selection = { type: ref.kind, id: ref.id };
+  select(ref.kind === 'table' ? { type: 'table', nodeId: node.id } : { type: ref.kind, id: ref.id });
 });
 
 onNodeDoubleClick(({ node, event }) => {
   const ref = itemOfFlowId(node.id);
-  if (ref.kind === 'diagram') post({ type: 'diagram/open', diagram: ref.id });
-  else if (ref.kind === 'partition' && !props.view.partitions.find((p) => p.id === ref.id)?.collapsed) {
-    const e = event as MouseEvent;
-    const point = screenToFlowCoordinate({ x: e.clientX, y: e.clientY });
-    emit('create-table', ref.id, clampInFrame(ref.id, relativeTo(ref.id, point)));
-  } else if (ref.kind === 'partition') emit('enter', ref.id);
+  if (ref.kind === 'diagram') {
+    select({ type: 'diagram', id: ref.id });
+    requestDiagramEdit(ref.id);
+    return;
+  }
+  if (ref.kind === 'partition') {
+    focusItems([ref]);
+  }
 });
 
 onEdgeClick(({ edge }) => {
@@ -373,7 +467,9 @@ onEdgeClick(({ edge }) => {
 });
 
 onPaneClick(() => {
+  requested = undefined;
   state.selection = undefined;
+  setLevel(undefined);
 });
 
 onNodeContextMenu(({ node, event }) => {
@@ -388,23 +484,6 @@ onPaneContextMenu((event) => {
   emit('pane-menu', { x: e.clientX, y: e.clientY, flow: screenToFlowCoordinate({ x: e.clientX, y: e.clientY }) });
 });
 
-watch(
-  () => state.focus?.seq,
-  async () => {
-    const f = state.focus;
-    if (!f) return;
-    await nextTick();
-    setTimeout(() => {
-      if (nodes.value.some((n) => n.id === f.nodeId)) void fitView({ nodes: [f.nodeId], padding: 0.6, duration: 300, maxZoom: 1.2 });
-    }, 120);
-  },
-);
-
-function onDoubleClick(event: MouseEvent) {
-  if (!(event.target as HTMLElement).classList.contains('vue-flow__pane')) return;
-  emit('create-table', props.view.scope, screenToFlowCoordinate({ x: event.clientX, y: event.clientY }));
-}
-
 function togglePartition(id: string) {
   const p = props.canvas.partitions.find((x) => x.id === id);
   if (p) editCanvas(p.collapsed ? '展开分区画布' : '折叠分区画布', [{ op: 'partition.put', partition: { ...p, collapsed: !p.collapsed } }]);
@@ -416,13 +495,22 @@ function resizeDiagram({ id, width, height }: { id: string; width: number; heigh
   if (d) editCanvas('调整设计图大小', [{ op: 'diagrams.put', diagrams: [{ id, x: p.x, y: p.y, width, height, partition: d.partition }] }]);
 }
 
+function resizePartition({ id, width, height }: { id: string; width: number; height: number }) {
+  const part = props.canvas.partitions.find((x) => x.id === id);
+  if (part) editCanvas('调整分区画布大小', [{ op: 'partition.put', partition: { ...part, width, height } }]);
+}
+
 // ── Auto layout ────────────────────────────────────────────────────
 
+/** Whole canvas; with `onlySelected`, the inside of a selected frame or the selected tables of one level. */
 async function autoLayout(onlySelected: boolean) {
   const edit: CanvasEdit = [];
-  if (!onlySelected) {
+  const selectedFrames = getSelectedNodes.value.filter((n) => n.id.startsWith('part:'));
+  const within = onlySelected && selectedFrames.length === 1 ? selectedFrames[0].id.slice(5) : undefined;
+  if (within && props.view.partitions.find((p) => p.id === within)?.collapsed) return;
+  if (!onlySelected || within) {
     laying.value = true;
-    const positions = await layoutLevel(props.view);
+    const positions = await layoutLevel(props.view, within);
     laying.value = false;
     const tables = [];
     for (const [id, p] of positions) {
@@ -440,9 +528,9 @@ async function autoLayout(onlySelected: boolean) {
       }
     }
     if (tables.length) edit.unshift({ op: 'nodes.put', nodes: tables });
-    editCanvas('自动布局', edit);
+    editCanvas(within ? '布局分区画布' : '自动布局', edit);
     await nextTick();
-    setTimeout(() => void fitView({ padding: 0.1, duration: 300 }), 80);
+    setTimeout(() => focusOn(within ? [`part:${within}`] : []), 80);
     return;
   }
   const selected = new Set(getSelectedNodes.value.map((n) => n.id));
@@ -480,27 +568,36 @@ defineExpose({
   selectedNodeIds,
   frameAt,
   relativeTo,
+  insideLevel,
+  focusOn,
   toFlow: (screen: Position) => screenToFlowCoordinate(screen),
-  fitView: () => fitView({ padding: 0.1, duration: 300 }),
 });
 </script>
 
 <template>
-  <div class="canvas" @dblclick="onDoubleClick">
+  <div ref="container" class="canvas">
     <VueFlow
       :id="FLOW_ID"
       v-model:nodes="nodes"
       v-model:edges="edges"
-      :min-zoom="0.05"
+      :min-zoom="MIN_ZOOM"
       :max-zoom="2"
       :connection-mode="ConnectionMode.Loose"
       :delete-key-code="null"
       :zoom-on-double-click="false"
       :elevate-edges-on-select="true"
-      :only-render-visible-elements="view.tables.length > 100"
+      :only-render-visible-elements="true"
     >
       <template #node-partition="nodeProps">
-        <PartitionNode :data="nodeProps.data" :selected="nodeProps.selected" :drop-target="dropTarget === nodeProps.data.id" @enter="emit('enter', $event)" @toggle="togglePartition" />
+        <PartitionNode
+          :data="nodeProps.data"
+          :selected="nodeProps.selected"
+          :current="state.level === nodeProps.data.id"
+          :drop-target="dropTarget === nodeProps.data.id"
+          @focus="focusItems([{ kind: 'partition', id: $event }])"
+          @toggle="togglePartition"
+          @resize="resizePartition"
+        />
       </template>
       <template #node-table="nodeProps">
         <TableNode :data="nodeProps.data" :selected="nodeProps.selected" />

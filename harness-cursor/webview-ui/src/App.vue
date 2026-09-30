@@ -17,7 +17,7 @@ import type { RelationKind } from '@shared/model';
 import { effectiveNamespace, namespaceLabel, qualify } from '@shared/namespace';
 import type { SyncGroup } from '@shared/sync';
 import { nextDefaultName } from '@shared/workspace';
-import { buildView, TABLE_HANDLE, type TableView } from './canvas/viewModel';
+import { buildView, levelContent, TABLE_HANDLE, type TableView } from './canvas/viewModel';
 import { NODE_WIDTH, PART_HEADER, PART_PAD, type Position } from './canvas/layout';
 import CanvasView from './components/CanvasView.vue';
 import ContextMenu, { type MenuItem } from './components/ContextMenu.vue';
@@ -32,20 +32,28 @@ import {
   deletePartition,
   designOp,
   editCanvas,
+  flowId,
+  focusItems,
+  focusLevel,
   focusNode,
   handleHostMessage,
   ignoreSync,
   itemOfFlowId,
   moveItems,
   paste,
+  requestDiagramEdit,
+  reveal,
+  select,
+  selectNodes,
   setClipboard,
-  setScope,
+  setLevel,
   state,
   toast,
 } from './store';
 import { getState, onHostMessage, post, setState } from './vscode';
 
-const view = computed(() => buildView(canvas.value, state.sources, state.comparison, state.diagrams, state.scope));
+const view = computed(() => buildView(canvas.value, state.sources, state.comparison, state.diagrams));
+const levelLists = computed(() => levelContent(view.value, state.level));
 const flow = ref<InstanceType<typeof CanvasView>>();
 const rightTab = ref<'inspector' | 'diff' | 'sync'>('inspector');
 const menu = ref<{ x: number; y: number; title?: string; items: MenuItem[] }>();
@@ -71,9 +79,9 @@ const emptyDesign = computed(() => {
 const levelEmpty = computed(() => !view.value.tables.length && !view.value.diagrams.length && !view.value.partitions.length && !view.value.notes.length);
 const syncBusy = ref(false);
 
-const path = computed(() => partitionPath(canvas.value, state.scope));
-const scopeNamespace = computed(() => {
-  const ns = effectiveNamespace(canvas.value, state.scope);
+const path = computed(() => partitionPath(canvas.value, state.level));
+const levelNamespace = computed(() => {
+  const ns = effectiveNamespace(canvas.value, state.level);
   return ns && namespaceLabel(ns);
 });
 
@@ -87,7 +95,7 @@ async function onApplySync(group: SyncGroup, ids: string[], choices: Record<stri
 }
 
 function openDiagram(group: SyncGroup) {
-  post({ type: 'diagram/open', diagram: group.diagram });
+  reveal({ item: { kind: 'diagram', id: group.diagram } });
 }
 
 const comparisonValue = computed(() => canvas.value.comparison?.db ?? '');
@@ -99,6 +107,23 @@ function tableView(id: string): TableView | undefined {
 
 function center(): Position {
   return flow.value?.centerPosition() ?? { x: 0, y: 0 };
+}
+
+/** Below everything inside a frame (it grows to fit); the root has room anywhere. */
+function freeSpot(level: string | undefined): Position {
+  const p = level && view.value.partitions.find((x) => x.id === level);
+  if (!p) return center();
+  return { x: PART_PAD, y: Math.max(PART_HEADER + PART_PAD, p.height - PART_PAD + 16) };
+}
+
+/**
+ * Where something new goes on a level: the screen center when it lies inside that level,
+ * otherwise a free spot there. `visible` is false when the spot is off screen and needs focusing.
+ */
+function spotIn(level: string | undefined): { at: Position; visible: boolean } {
+  const c = center();
+  if (flow.value?.insideLevel(level, c)) return { at: flow.value.relativeTo(level, c), visible: true };
+  return { at: freeSpot(level), visible: false };
 }
 
 function hasEntry(id: string): boolean {
@@ -115,43 +140,51 @@ function uniqueTableName(level: string | undefined): string {
   return name;
 }
 
-async function createTable(level: string | undefined = state.scope, position?: Position) {
+/** Selects a newly created item and brings it on screen when it landed outside the view. */
+function selectCreated(ref: ItemRef, visible: boolean) {
+  selectNodes([flowId(ref)]);
+  select(state.selection);
+  rightTab.value = 'inspector';
+  rightCollapsed.value = false;
+  if (!visible) focusItems([ref]);
+}
+
+async function createTable(level: string | undefined = state.level, position?: Position) {
   if (!hasDesignSchema.value) {
     toast('还没有加载设计库', 'error');
     return;
   }
-  const p = position ?? (level === state.scope ? center() : { x: PART_PAD, y: PART_HEADER + PART_PAD });
+  const spot = position ? { at: position, visible: true } : spotIn(level);
+  const p = spot.at;
   const table = uniqueTableName(level);
   const ok = await designOp([{ op: 'table.add', table }], `新建表 ${table}`, [
-    { op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table, x: p.x, y: p.y, partition: level }] },
+    { op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table, x: Math.round(p.x), y: Math.round(p.y), partition: level }] },
   ]);
   if (ok) {
-    state.selection = { type: 'table', nodeId: nodeId(DESIGN_SOURCE, table) };
-    rightTab.value = 'inspector';
-    rightCollapsed.value = false;
+    selectCreated({ kind: 'table', id: nodeId(DESIGN_SOURCE, table) }, spot.visible);
     toast(`已新建表 ${table}，可以在右侧修改表名和字段`);
   }
 }
 
-function createPartition(level: string | undefined = state.scope, position?: Position) {
-  const p = position ?? (level === state.scope ? center() : { x: PART_PAD, y: PART_HEADER + PART_PAD });
+function createPartition(level: string | undefined = state.level, position?: Position) {
+  const spot = position ? { at: position, visible: true } : spotIn(level);
   const id = nextPartitionId(canvas.value);
   const name = nextDefaultName('分区画布', canvas.value.partitions.map((x) => x.name));
-  editCanvas(`新建分区画布 ${name}`, [{ op: 'partition.put', partition: { id, name, parent: level, x: Math.round(p.x), y: Math.round(p.y) } }]);
-  state.selection = { type: 'partition', id };
-  rightTab.value = 'inspector';
-  rightCollapsed.value = false;
+  editCanvas(`新建分区画布 ${name}`, [{ op: 'partition.put', partition: { id, name, parent: level, x: Math.round(spot.at.x), y: Math.round(spot.at.y) } }]);
+  selectCreated({ kind: 'partition', id }, spot.visible);
 }
 
-function createNote(level: string | undefined = state.scope, position?: Position) {
-  const p = position ?? (level === state.scope ? center() : { x: PART_PAD, y: PART_HEADER + PART_PAD });
+function createNote(level: string | undefined = state.level, position?: Position) {
+  const spot = position ? { at: position, visible: true } : spotIn(level);
   const id = `n${Date.now().toString(36)}`;
-  editCanvas('添加便签', [{ op: 'note.put', note: { id, text: '', x: Math.round(p.x), y: Math.round(p.y), width: 200, partition: level } }]);
-  state.selection = { type: 'note', id };
+  editCanvas('添加便签', [{ op: 'note.put', note: { id, text: '', x: Math.round(spot.at.x), y: Math.round(spot.at.y), width: 200, partition: level } }]);
+  selectCreated({ kind: 'note', id }, spot.visible);
 }
 
-function createDiagram(type: DiagramType, level: string | undefined = state.scope, position?: Position) {
-  post({ type: 'diagram/create', diagramType: type, partition: level, at: position ?? (level === state.scope ? center() : undefined) });
+/** The host places the card, then reveals it with the Mermaid text ready to type. */
+function createDiagram(type: DiagramType, level: string | undefined = state.level, position?: Position) {
+  const at = position ?? spotIn(level).at;
+  post({ type: 'diagram/create', diagramType: type, partition: level, at: { x: Math.round(at.x), y: Math.round(at.y) } });
 }
 
 function diagramMenuItems(level: string | undefined, position?: Position): MenuItem[] {
@@ -159,16 +192,17 @@ function diagramMenuItems(level: string | undefined, position?: Position): MenuI
 }
 
 function openDiagramMenu(e: MouseEvent) {
-  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  menu.value = { x: r.left, y: r.bottom + 2, title: '新建设计图（放在这一层）', items: diagramMenuItems(state.scope) };
+  const anchor = (e.currentTarget ?? (e.target as HTMLElement | null)?.closest('button') ?? e.target) as HTMLElement;
+  const r = anchor.getBoundingClientRect();
+  menu.value = { x: r.left, y: r.bottom + 2, title: '新建设计图（放在当前层）', items: diagramMenuItems(state.level) };
 }
 
 // ── Database tables on this level ─────────────────────────────────
 
 function addDbTables(source: string, tables: string[], near?: string) {
   if (!tables.length) return;
-  const level = near ? tableView(near)?.partition : state.scope;
-  const anchor = near ? flow.value?.currentPosition(near) ?? center() : center();
+  const level = near ? tableView(near)?.partition : state.level;
+  const anchor = near ? flow.value?.currentPosition(near) ?? center() : spotIn(level).at;
   const at = (i: number): Position =>
     near ? { x: anchor.x + NODE_WIDTH + 80, y: anchor.y + i * 200 } : { x: anchor.x - NODE_WIDTH / 2 + (i % 4) * (NODE_WIDTH + 40), y: anchor.y + Math.floor(i / 4) * 260 };
   const put: CanvasEdit[number] & { op: 'nodes.put' } = { op: 'nodes.put', nodes: [] };
@@ -244,24 +278,33 @@ function pinImplicit(ids: string[]): void {
 
 function copyOrCut(mode: 'copy' | 'cut', ids = selectedIds()) {
   if (!ids.length) return;
+  if (mode === 'cut' && ids.some((id) => tableView(id)?.sourceKind === 'db')) {
+    toast('数据库表只能复制（粘贴后成为设计表），不能剪切', 'error');
+    return;
+  }
   pinImplicit(ids);
   setClipboard(mode, ids.map(itemOfFlowId));
 }
 
+/**
+ * Ctrl+V always goes into the current level: at the mouse when it is inside that level's area,
+ * otherwise at a free spot there. Menus pass their own target.
+ */
 function pasteHere(target?: { partition: string | undefined; at?: Position }) {
   if (!state.clipboard) {
     toast('剪贴板是空的：先选中表、设计图或分区框，按 Ctrl+C 或 Ctrl+X');
     return;
   }
   if (target) return void paste(target.partition, target.at);
-  const ids = flow.value?.selectedNodeIds() ?? [];
-  if (ids.length === 1 && ids[0].startsWith('part:')) return void paste(ids[0].slice(5));
+  const level = state.level;
   if (pointer.overCanvas && flow.value) {
     const point = flow.value.toFlow({ x: pointer.x, y: pointer.y });
-    const frame = flow.value.frameAt(point);
-    return void paste(frame ?? state.scope, frame ? flow.value.relativeTo(frame, point) : point);
+    if (flow.value.insideLevel(level, point)) return void paste(level, flow.value.relativeTo(level, point));
   }
-  void paste(state.scope, center());
+  const spot = spotIn(level);
+  void paste(level, spot.at).then(() => {
+    if (!spot.visible) focusLevel(level);
+  });
 }
 
 // ── Relations ─────────────────────────────────────────────────────
@@ -384,7 +427,9 @@ function openNodeMenu({ id, x, y, flow: point }: { id: string; x: number; y: num
     if (!d) return;
     title ??= d.name;
     items = [
-      { label: '打开设计图', action: () => post({ type: 'diagram/open', diagram: d.id }) },
+      { label: '编辑 Mermaid 文本', hint: '双击卡片', action: () => editDiagramText(d.id) },
+      { label: '在单独标签页中打开', action: () => post({ type: 'diagram/openInTab', diagram: d.id }) },
+      { label: '复制给 AI', action: () => post({ type: 'diagram/copyForAI', diagram: d.id }) },
       ...(d.pending ? [{ label: `查看待同步（${d.pending}）`, action: () => showPending() }] : []),
       { separator: true },
       ...clipboardItems(targets),
@@ -399,7 +444,7 @@ function openNodeMenu({ id, x, y, flow: point }: { id: string; x: number; y: num
     title ??= p.name;
     const inside = p.collapsed ? undefined : flow.value?.relativeTo(p.id, point);
     items = [
-      { label: '进入这个分区画布', hint: '双击标题', action: () => setScope(p.id) },
+      { label: '聚焦', hint: 'F / 双击标题', action: () => focusItems([ref]) },
       { label: p.collapsed ? '展开' : '折叠', action: () => editCanvas(p.collapsed ? '展开分区画布' : '折叠分区画布', [{ op: 'partition.put', partition: { ...raw, collapsed: !p.collapsed } }]) },
       { separator: true },
       { label: '在这里新建表', disabled: !hasDesignSchema.value, action: () => void createTable(p.id, inside) },
@@ -417,11 +462,14 @@ function openNodeMenu({ id, x, y, flow: point }: { id: string; x: number; y: num
   } else {
     items = [{ label: '删除便签', danger: true, action: () => hideItems([id]) }];
   }
+  if (ref.kind !== 'partition') items.unshift({ label: '聚焦', hint: 'F', action: () => focusItems(targets.map(itemOfFlowId)) }, { separator: true });
   menu.value = { x, y, title, items };
 }
 
+/** The root canvas, where a right-click on empty space lands. */
 function openPaneMenu({ x, y, flow: point }: { x: number; y: number; flow: Position }) {
-  const level = state.scope;
+  const level = undefined;
+  setLevel(level);
   menu.value = {
     x,
     y,
@@ -444,9 +492,33 @@ function removeOrHide(ids: string[]) {
 }
 
 function selectPartition(id: string) {
-  state.selection = { type: 'partition', id };
+  select({ type: 'partition', id });
   rightTab.value = 'inspector';
   rightCollapsed.value = false;
+}
+
+function editDiagramText(id: string) {
+  select({ type: 'diagram', id });
+  selectNodes([`diagram:${id}`]);
+  rightTab.value = 'inspector';
+  rightCollapsed.value = false;
+  requestDiagramEdit(id);
+}
+
+/** F: zoom to the selection (the bounding box when several are selected), or to the current level. */
+function focusSelection() {
+  const ids = selectedIds();
+  if (ids.length) focusItems(ids.map(itemOfFlowId));
+  else focusLevel(state.level);
+}
+
+/** Esc: first drop the selection, then zoom out to the parent level. */
+function escape() {
+  if (state.selection || flow.value?.selectedNodeIds().length) {
+    selectNodes([]);
+    return;
+  }
+  if (state.level) focusLevel(canvas.value.partitions.find((p) => p.id === state.level)?.parent);
 }
 
 function showPending() {
@@ -500,8 +572,13 @@ function onKeyDown(e: KeyboardEvent) {
       return;
     }
   }
-  if (e.key === 'Escape' && state.scope && !state.selection) {
-    setScope(canvas.value.partitions.find((p) => p.id === state.scope)?.parent);
+  if (e.key === 'Escape') {
+    escape();
+    return;
+  }
+  if (!mod && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    focusSelection();
     return;
   }
   if (e.key !== 'Delete' && e.key !== 'Backspace') return;
@@ -564,24 +641,24 @@ onUnmounted(() => {
     <div v-else-if="state.error" class="center error">{{ state.error }}</div>
     <template v-else>
       <header class="toolbar">
-        <nav class="crumbs" aria-label="当前画布">
-          <a href="#" class="crumb" :class="{ current: !state.scope }" :title="state.scope ? '回到根画布' : '根画布'" @click.prevent="setScope(undefined)">{{ state.design?.name ?? '设计画布' }}</a>
+        <nav class="crumbs" aria-label="当前层" title="当前层：新建和粘贴都放到这一层。点选分区框或画布空白处切换，点这里的名字缩放到那一层">
+          <a href="#" class="crumb" :class="{ current: !state.level }" title="缩放到整张画布" @click.prevent="focusLevel(undefined)">{{ state.design?.name ?? '设计画布' }}</a>
           <template v-for="p in path" :key="p.id">
             <span class="crumb-sep">›</span>
-            <a href="#" class="crumb" :class="{ current: p.id === state.scope }" :title="p.description" @click.prevent="setScope(p.id)">{{ p.name }}</a>
+            <a href="#" class="crumb" :class="{ current: p.id === state.level }" :title="p.description ?? '缩放到这个分区画布'" @click.prevent="focusLevel(p.id)">{{ p.name }}</a>
           </template>
-          <button v-if="state.scope" class="ns-btn" :title="scopeNamespace ? '这一层新建的表会自动带上这个命名空间' : '设置命名空间：这一层新建或粘贴进来的表会自动加上 schema 或前缀'" @click="post({ type: 'partition/namespace', id: state.scope })">
-            {{ scopeNamespace ?? '命名空间…' }}
+          <button v-if="state.level" class="ns-btn" :title="levelNamespace ? '这一层新建的表会自动带上这个命名空间' : '设置命名空间：这一层新建或粘贴进来的表会自动加上 schema 或前缀'" @click="post({ type: 'partition/namespace', id: state.level })">
+            {{ levelNamespace ?? '命名空间…' }}
           </button>
         </nav>
-        <button :disabled="!hasDesignSchema" title="也可以双击画布空白处" @click="createTable()">+ 新建表</button>
+        <button :disabled="!hasDesignSchema" title="在当前层新建一张设计表" @click="createTable()">+ 新建表</button>
         <button class="secondary" :disabled="!hasDesignSchema" @click="openDiagramMenu">+ 设计图 ▾</button>
         <button class="secondary" @click="createPartition()">+ 分区画布</button>
         <button class="secondary" @click="createNote()">+ 便签</button>
         <span class="sep" />
-        <button class="secondary" :disabled="levelEmpty" @click="flow?.autoLayout(false)">自动布局</button>
-        <button class="secondary" :disabled="!view.tables.length" title="只重新排列选中的表" @click="flow?.autoLayout(true)">布局选中</button>
-        <button class="secondary" :disabled="levelEmpty" @click="flow?.fitView()">适应窗口</button>
+        <button class="secondary" :disabled="levelEmpty" title="重新排列整张画布" @click="flow?.autoLayout(false)">自动布局</button>
+        <button class="secondary" :disabled="levelEmpty" title="选中一个分区框：只排列框里的内容；选中几张表：只排列这些表" @click="flow?.autoLayout(true)">布局选中</button>
+        <button class="secondary" :disabled="levelEmpty" title="缩放到整张画布" @click="focusLevel(undefined)">适应窗口</button>
         <span class="sep" />
         <label>
           字段
@@ -619,11 +696,11 @@ onUnmounted(() => {
         </aside>
         <aside v-else class="left">
           <SourcePanel
-            :view="view"
+            :level="levelLists"
             @add-db-tables="addDbTables"
             @remove-db-tables="removeDbTables"
             @create-table="createTable()"
-            @create-diagram="menu = { x: pointer.x, y: pointer.y, title: '新建设计图（放在这一层）', items: diagramMenuItems(state.scope) }"
+            @create-diagram="menu = { x: pointer.x, y: pointer.y, title: '新建设计图（放在当前层）', items: diagramMenuItems(state.level) }"
             @collapse="leftCollapsed = true"
           />
         </aside>
@@ -633,17 +710,15 @@ onUnmounted(() => {
             :view="view"
             :canvas="canvas"
             @connect="onConnect"
-            @create-table="(level, p) => void createTable(level, p)"
             @node-menu="openNodeMenu"
             @pane-menu="openPaneMenu"
-            @enter="setScope"
             @pending="showPending"
           />
           <div v-if="!hasDesignSchema && !dbSources.length" class="empty-overlay">
             <p>这个画布还是空的。</p>
             <p class="muted">在左侧"数据源"里添加数据库，或者先新建表。</p>
           </div>
-          <div v-else-if="!state.scope && levelEmpty && emptyDesign" class="empty-overlay">
+          <div v-else-if="levelEmpty && emptyDesign" class="empty-overlay">
             <p>设计画布"{{ state.design?.name ?? 'design' }}"还没有表。</p>
             <p class="muted">可以直接新建表，也可以先写一张 ER 图（复制给 AI 帮你写），再同步成表结构。</p>
             <div class="empty-actions">
@@ -652,8 +727,8 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-else-if="levelEmpty" class="empty-overlay">
-            <p>{{ state.scope ? '这个分区画布还是空的。' : '画布上还没有内容。' }}</p>
-            <p class="muted">双击空白处新建表；也可以把表、设计图拖进来，或者 Ctrl+V 粘贴。</p>
+            <p>画布上还没有内容。</p>
+            <p class="muted">在工具栏或右键菜单中新建表；也可以把表、设计图拖进来，或者 Ctrl+V 粘贴。</p>
           </div>
         </section>
         <aside v-if="rightCollapsed" class="rail right-rail" title="展开属性面板" @click="rightCollapsed = false">
@@ -673,7 +748,13 @@ onUnmounted(() => {
             <button class="collapse" title="收起右侧面板" @click="rightCollapsed = true">»</button>
           </nav>
           <div class="tab-body">
-            <Inspector v-if="rightTab === 'inspector'" :view="view" />
+            <Inspector
+              v-if="rightTab === 'inspector'"
+              :view="view"
+              @add-db-tables="addDbTables"
+              @create-table="createTable()"
+              @create-diagram="openDiagramMenu"
+            />
             <DiffPanel v-else-if="rightTab === 'diff'" :view="view" />
             <template v-else>
               <p v-if="!state.pending.length" class="sync-empty muted">

@@ -5,11 +5,13 @@ import type { ColumnPatch, RelationPatch } from '@shared/designOps';
 import type { NColumn, NRelation, NTable, RelationKind } from '@shared/model';
 import { COLUMN_TEMPLATES, columnTemplate, parseQuickColumns, quickColumnOps, type ColumnTemplate, type QuickColumn } from '@shared/quickColumns';
 import type { TblsCardinality } from '@shared/tbls';
-import { diagramTypeLabel } from '@shared/diagram';
 import { effectiveNamespace, namespaceLabel } from '@shared/namespace';
 import type { CanvasView } from '../canvas/viewModel';
-import { canvas, deleteDiagram, deletePartition, designOp, editCanvas, focusNode, setScope, state, toast } from '../store';
+import { canvas, deletePartition, designOp, editCanvas, focusItems, focusLevel, focusNode, state, toast } from '../store';
 import { post } from '../vscode';
+import DbTableInspector from './DbTableInspector.vue';
+import DiagramInspector from './DiagramInspector.vue';
+import LevelContents from './LevelContents.vue';
 
 const RELATION_KINDS: { value: RelationKind; label: string }[] = [
   { value: 'fk', label: '外键（数据库约束）' },
@@ -55,6 +57,28 @@ interface Target {
 }
 
 const props = defineProps<{ view: CanvasView }>();
+const emit = defineEmits<{
+  'add-db-tables': [source: string, tables: string[]];
+  'create-table': [];
+  'create-diagram': [event: MouseEvent];
+}>();
+
+/** Nothing selected: what the current level holds. */
+const levelInfo = computed(() => {
+  const level = state.level;
+  const own = props.view.levels.get(level ?? '');
+  const p = level ? canvas.value.partitions.find((x) => x.id === level) : undefined;
+  const ns = effectiveNamespace(canvas.value, level);
+  return {
+    name: p?.name ?? state.design?.name ?? '设计画布',
+    isRoot: !p,
+    namespace: ns && namespaceLabel(ns),
+    tables: own?.tables.length ?? 0,
+    diagrams: own?.diagrams.length ?? 0,
+    db: Object.values(own?.db ?? {}).reduce((n, s) => n + s.size, 0),
+    partitions: canvas.value.partitions.filter((x) => x.parent === level).length,
+  };
+});
 
 const target = computed<Target | undefined>(() => {
   const sel = state.selection;
@@ -105,11 +129,6 @@ function updatePartition(patch: { name?: string; description?: string }) {
   const next = { ...p, ...patch, ...(name ? { name } : {}) };
   if (patch.description !== undefined && !patch.description.trim()) delete next.description;
   if (JSON.stringify(next) !== JSON.stringify(p)) editCanvas(patch.name !== undefined ? '重命名分区画布' : '修改分区画布说明', [{ op: 'partition.put', partition: next }]);
-}
-
-function hideDiagram(id: string) {
-  editCanvas('隐藏设计图', [{ op: 'hidden.set', items: [{ kind: 'diagram', id }], hidden: true }]);
-  state.selection = undefined;
 }
 
 const tableRelations = computed(() => {
@@ -251,7 +270,25 @@ function cardinalityLabel(c: TblsCardinality): string {
 
 <template>
   <div class="inspector" @keydown.stop>
-    <p v-if="!state.selection" class="muted hint">选中画布上的表、字段、关系、设计图或分区框，在这里查看和编辑。双击画布空白处可以新建表。</p>
+    <template v-if="!state.selection">
+      <h3 class="head">
+        <span>{{ levelInfo.isRoot ? '设计画布' : '分区画布' }} <span class="level-name">{{ levelInfo.name }}</span></span>
+        <button class="secondary small" title="缩放到这一层" @click="focusLevel(state.level)">⤢ 聚焦</button>
+      </h3>
+      <p class="muted">
+        当前层：新建和粘贴都放到这里<template v-if="levelInfo.namespace">，新表自动带上命名空间 <span class="ns">{{ levelInfo.namespace }}</span></template>。
+      </p>
+      <p class="muted">
+        {{ levelInfo.tables }} 张设计表 · {{ levelInfo.diagrams }} 张设计图 · {{ levelInfo.partitions }} 个子分区画布<template v-if="levelInfo.db"> · {{ levelInfo.db }} 张数据库表</template>
+      </p>
+      <div class="row-actions">
+        <button :disabled="!state.sources[DESIGN_SOURCE]?.schema" @click="emit('create-table')">+ 新建表</button>
+        <button class="secondary" :disabled="!state.sources[DESIGN_SOURCE]?.schema" @click="emit('create-diagram', $event)">+ 新建设计图 ▾</button>
+      </div>
+      <div class="section-title"><span>本层内容</span></div>
+      <LevelContents :level="state.level" :view="view" />
+      <p class="muted hint">选中画布上的表、设计图或分区框，在这里查看和编辑。点分区框或它的空白处切换当前层，点画布空白处回到根画布。</p>
+    </template>
 
     <template v-else-if="partition">
       <h3>分区画布</h3>
@@ -275,26 +312,15 @@ function cardinalityLabel(c: TblsCardinality): string {
         本层 {{ partitionView.counts.tables }} 张设计表、{{ partitionView.counts.diagrams }} 张设计图、{{ partitionView.counts.partitions }} 个子分区画布
       </p>
       <div class="row-actions">
-        <button class="secondary" @click="setScope(partition.id)">进入</button>
+        <button class="secondary" title="F" @click="focusItems([{ kind: 'partition', id: partition.id }])">聚焦</button>
         <span class="spacer" />
         <button class="secondary danger" @click="deletePartition(partition.id)">删除分区画布…</button>
       </div>
+      <div class="section-title"><span>本层内容</span></div>
+      <LevelContents :level="partition.id" :view="view" />
     </template>
 
-    <template v-else-if="diagram">
-      <h3>设计图</h3>
-      <p>
-        {{ diagram.name }} <span class="muted">（{{ diagramTypeLabel(diagram.type) }}）</span>
-      </p>
-      <p v-if="diagram.description" class="muted">{{ diagram.description }}</p>
-      <p v-if="diagram.pending" class="readonly">和表结构有 {{ diagram.pending }} 处不一致，可以在"待同步"页签中确认同步。</p>
-      <div class="row-actions">
-        <button @click="post({ type: 'diagram/open', diagram: diagram.id })">打开编辑</button>
-        <button class="secondary" @click="hideDiagram(diagram.id)">隐藏</button>
-        <span class="spacer" />
-        <button class="secondary danger" @click="deleteDiagram(diagram.id)">删除…</button>
-      </div>
-    </template>
+    <DiagramInspector v-else-if="diagram" :diagram="diagram" />
 
     <template v-else-if="note">
       <h3>便签</h3>
@@ -423,9 +449,17 @@ function cardinalityLabel(c: TblsCardinality): string {
       </div>
     </template>
 
+    <DbTableInspector
+      v-else-if="target?.table && target.kind === 'db'"
+      :source="target.source"
+      :table="target.table"
+      :view="view"
+      @add-db-tables="(source, tables) => emit('add-db-tables', source, tables)"
+    />
+
     <template v-else-if="target?.table">
-      <h3>{{ target.kind === 'design' ? '设计表' : '数据库表' }}</h3>
-      <p v-if="!target.editable" class="readonly">数据库中的表只能查看。要修改结构，请在设计库中修改后生成 SQL 执行。</p>
+      <h3>设计表</h3>
+      <p v-if="!target.editable" class="readonly">设计表结构还没有加载，暂时不能编辑。</p>
       <label>
         表名
         <input :value="target.table.key" :disabled="!target.editable" @change="renameTable(value($event))" />
@@ -496,6 +530,17 @@ function cardinalityLabel(c: TblsCardinality): string {
 h3 {
   margin: 0;
   font-size: 13px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.level-name {
+  font-weight: 400;
 }
 
 .crumb {

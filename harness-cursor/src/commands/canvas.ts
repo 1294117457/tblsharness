@@ -8,16 +8,17 @@ import type { HarnessWorkspace } from '../workspace/storage';
 import { pickSourceId, pickWorkspace, promptName, register, required, type Harness, type NodeArg } from './common';
 
 export function registerCanvasCommands(h: Harness): void {
-  /** Opens the design's editor; from a partition node (or a group inside one) it switches to that level. */
+  /** Opens the design's editor; from a partition node (or a group inside one) it zooms to that frame. */
   register(h, 'harness.design.open', async (arg) => {
     const ws = await pickWorkspace(h, arg);
     const designId = await pickSourceId(h, ws, 'design', arg);
-    await h.canvases.open(ws.id, designId, scopeOf(arg));
+    const partition = scopeOf(arg);
+    await h.canvases.open(ws.id, designId, partition ? { item: { kind: 'partition', id: partition } } : undefined);
   });
 
   register(h, 'harness.partition.open', async (arg) => {
     const { ws, design, partition } = await partitionFromArg(h, arg);
-    await h.canvases.open(ws.id, design, partition);
+    await h.canvases.open(ws.id, design, { item: { kind: 'partition', id: partition } });
   });
 
   register(h, 'harness.partition.create', async (arg) => {
@@ -30,6 +31,7 @@ export function registerCanvasCommands(h: Harness): void {
     const x = siblings.length ? Math.max(...siblings.map((s) => s.x)) + 400 : 0;
     const id = nextPartitionId(layout);
     await h.canvases.editLayout(ws.id, design, `新建分区画布 ${name}`, [{ op: 'partition.put', partition: { id, name, parent, x, y: 0 } }]);
+    await h.canvases.open(ws.id, design, { item: { kind: 'partition', id } });
   });
 
   register(h, 'harness.partition.rename', async (arg) => {

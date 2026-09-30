@@ -1,7 +1,7 @@
 # Harness 工程索引（当前实现）
 
 > 面向开发者和 AI agent 的快速上手索引。先读"一分钟概览"和"目录地图"，改功能时查"改什么去哪里"。
-> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-30（第二阶段修复文档 2 问题五完成：设计画布 = 可嵌套的分区画布，一个 `layout.json`，命名空间，复制 / 剪切 / 粘贴，设计图卡片；去掉多画布和 zones）。
+> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-30（第二阶段修复文档 3 完成：R1 去掉层级切换改为整张画布渲染+聚焦；R2 聚焦按钮 ⤢ / F 快捷键；R3 右侧设计图 Mermaid 编辑（DiagramInspector + MermaidCodeEditor）；R4 DbTableInspector 只读结构视图、分区内容列表、空选中当前层概况）。
 
 ## 1. 一分钟概览
 
@@ -15,7 +15,7 @@ Harness 是一个 Cursor / VS Code 插件，用 **tbls 的 JSON 格式**作为�
 - **设计图（diagram）**：设计画布下的 Mermaid 图（ER 图 / 状态图 / 时序图 / 流程图 / 数据流图），存为 `design/<designN>/diagrams/<diagramN>.md`。**AI 只写 Mermaid**；ER 图和表结构不一致时，由用户在右侧"差异/待同步"面板里勾选确认后才写入 `schema.json`，其他类型只预览不同步。
 - 画布上的设计图显示为 **Mermaid 卡片**（所有类型，含 ER 图；ER 图和表结构不一致时卡片上有"待同步 N"徽标）。
 
-侧边栏树：工作区 → 两个分组 **设计画布 / 数据库**；每个设计画布、每个分区画布下都是 **设计表**（本层的表 → 字段）/ **设计图** / **分区画布**（递归）。点击设计画布或分区画布 = 打开该设计的编辑器并切换到那一层（面包屑显示路径）。树支持多选、`Ctrl+C / X / V`、右键复制 / 剪切 / 粘贴、拖拽（= 剪切到目标层）。
+侧边栏树：工作区 → 两个分组 **设计画布 / 数据库**；每个设计画布、每个分区画布下都是 **设计表**（本层的表 → 字段）/ **设计图** / **分区画布**（递归）。点击设计画布 = 打开编辑器；点击分区画布 / 设计表 / 设计图 = 在画布中选中并聚焦（`reveal`）。树支持多选、`Ctrl+C / X / V`、右键复制 / 剪切 / 粘贴、拖拽（= 剪切到目标层）。
 
 硬性原则：
 
@@ -123,24 +123,28 @@ harness-cursor/
 ├─ webview-ui/src/         Webview 前端（一个 bundle，多个页面）
 │  ├─ main.ts              按 data-view 挂载 App.vue（画布）/ ConnectionApp.vue / EditApp.vue / DiagramApp.vue；浏览器开发时安装对应 mock host
 │  ├─ vscode.ts            acquireVsCodeApi 封装：post / request（带 requestId 等回复）/ onHostMessage
-│  ├─ store.ts             ★ 画布页面状态：canvas(shallowRef)、design、sources、diagrams、catalog、comparison、scope（当前层）、clipboard、selection（table/column/relation/note/diagram/partition）；
-│  │                       editCanvas / designOp / setScope / setClipboard / paste / moveItems / deletePartition / deleteDiagram / acceptDiff / focusNode；viewports 按层记住
-│  ├─ App.vue              ★ 画布页面外壳：面包屑（+ 命名空间按钮）、工具栏（新建表、+ 设计图 ▾、+ 分区画布、+ 便签、自动布局、字段显示、对比）、按当前层创建、
-│  │                       Ctrl+C / X / V、Esc 返回上一层、Delete = 隐藏、右键菜单、左右面板折叠成 32px 竖条（记住状态）
-│  ├─ canvas/viewModel.ts  ★ buildView(canvas, sources, comparison, diagrams, scope)：只生成当前层及其子分区 → tables（displayName/namespaceTag）/ edges / partitions（父在前）/ diagrams / notes / level（左侧面板用）
+│  ├─ store.ts             ★ 画布页面状态：canvas(shallowRef)、design、sources、diagrams、catalog、comparison、level（当前层）、clipboard、selection（table/column/relation/note/diagram/partition）；
+│  │                       editCanvas / designOp / setLevel / setClipboard / paste / moveItems / deletePartition / deleteDiagram / acceptDiff / focusNode / focusItems / focusLevel / reveal；savedViewport（根视口）
+│  ├─ App.vue              ★ 画布页面外壳：面包屑（当前层路径 + 聚焦）、工具栏（新建表、+ 设计图 ▾、+ 分区画布、+ 便签、自动布局、字段显示、对比）、按当前层创建、
+│  │                       Ctrl+C / X / V、Esc 先清选中再缩放到父层、F 聚焦选中、Delete = 隐藏、右键菜单、左右面板折叠成 32px 竖条（记住状态）
+│  ├─ canvas/viewModel.ts  ★ buildView(canvas, sources, comparison, diagrams)：总是从根生成全部层 → tables（displayName/namespaceTag）/ edges / partitions（父在前）/ diagrams / notes / levels（各层内容列表）
 │  ├─ canvas/layout.ts     ★ elkjs 自动布局：layoutTables、layoutLevel（多层复合节点，INCLUDE_CHILDREN）、placeNewTables
 │  ├─ components/
-│  │  ├─ CanvasView.vue    ★ Vue Flow 画布：分区框用 parentNode 嵌套（坐标相对父框）；拖入 / 拖出分区框（跨层走 items/move）；双击框内新建表、双击折叠框进入；设计图卡片可调大小；每层视口
-│  │  ├─ TableNode.vue     表节点（短名 + 灰色命名空间标签，悬停显示真实表名）
-│  │  ├─ PartitionNode.vue ★ 分区框：标题栏（折叠、名称、命名空间、数量、进入 ↗），双击标题进入
-│  │  ├─ DiagramNode.vue   ★ 设计图卡片：Mermaid 预览（MermaidPreview compact）、类型、"待同步 N"、右下角调整大小
-│  │  ├─ NoteNode.vue      便签节点
-│  │  ├─ Inspector.vue     属性面板（表/字段/关系；分区画布：名称、说明、命名空间、进入、删除；设计图：打开、隐藏、删除）
+│  │  ├─ CanvasView.vue    ★ Vue Flow 画布：分区框用 parentNode 嵌套（坐标相对父框）；拖入 / 拖出分区框（跨层走 items/move）；双击框内新建表、双击分区标题聚焦；设计图卡片可调大小；onlyRenderVisibleElements；focusOn 自算 bbox + maxZoom 1.5
+│  │  ├─ TableNode.vue     表节点（短名 + 灰色命名空间标签，悬停显示真实表名，选中时 FocusButton）
+│  │  ├─ PartitionNode.vue ★ 分区框：标题栏（折叠、名称、命名空间、数量、聚焦 ⤢），双击标题 = 聚焦
+│  │  ├─ DiagramNode.vue   ★ 设计图卡片：Mermaid 预览（MermaidPreview compact）、类型、"待同步 N"、选中时 FocusButton、右下角调整大小
+│  │  ├─ NoteNode.vue      便签节点（选中时 FocusButton）
+│  │  ├─ FocusButton.vue   选中时显示的 ⤢ 聚焦按钮，点击 → focusItems
+│  │  ├─ Inspector.vue     属性面板（设计表/字段/关系编辑；分区画布：名称、说明、命名空间、本层内容列表、聚焦、删除；空选中：当前层概况 + 本层内容列表 + 新建按钮）
+│  │  ├─ DiagramInspector.vue 设计图属性：名称、类型、说明、MermaidCodeEditor（300ms debounce）、per-diagram SyncPanel、复制给 AI / 隐藏 / 删除 / 单独标签页
+│  │  ├─ DbTableInspector.vue 数据库表只读结构视图：来源、快照时间、注释、字段（类型/标志/FK 指向）、索引、外键、被引用、复制按钮、从画布移除
+│  │  ├─ LevelContents.vue 层内内容列表（分区框、设计表、设计图、数据库表、便签），点击 = reveal
 │  │  ├─ DiffPanel.vue     差异列表
 │  │  ├─ SourcePanel.vue   ★ 数据源面板（只显示当前层）：设计表（本层 N，全部显示）、设计图（本层 N，全部显示）、每个数据库（显示全部表、⟳、✕）+ 添加数据库
 │  │  ├─ ContextMenu.vue   右键菜单
 │  │  └─ SyncPanel.vue     同步项勾选列表（画布"待同步"页签和设计图编辑器共用）
-│  ├─ diagram/             DiagramApp.vue（文本 + 预览 + 差异面板）、MermaidPreview.vue（按需 import mermaid）、host.ts
+│  ├─ diagram/             DiagramApp.vue（文本 + 预览 + 差异面板）、MermaidCodeEditor.vue（从 DiagramApp 抽取的文本框：行号、Tab、防抖、外部修改提示，画布右侧和独立编辑器共用）、MermaidPreview.vue（按需 import mermaid）、mermaid.ts（共享 loader）、host.ts
 │  ├─ connection/          ConnectionApp.vue（连接页面）、DriverFields.vue（按库类型渲染字段）、form.ts、host.ts
 │  ├─ edit/                EditApp.vue（编辑页面）、host.ts
 │  └─ dev/                 mockHost.ts（v3 布局，示例分区画布 + 设计图；浏览器模式不支持粘贴） / mockConnectionHost.ts / mockEditHost.ts / mockDiagramHost.ts / fixtures.ts（仅开发模式，不进生产包）
@@ -245,10 +249,11 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 ### 5.6 分区画布、命名空间、复制 / 剪切
 
-- **层级（scope）**：根画布或某个分区画布。树上点击 / 面包屑 / 双击分区框标题 / 框上 ↗ 切换；`Esc` 返回上一层。画布只显示当前层和它的子分区（嵌套框），左侧数据源只列当前层。每层的视口分别记在 `viewports`。
+- **整张画布渲染 + 当前层 + 聚焦**（修复文档 3 R1–R2）：画布始终渲染全部层（不再按 scope 裁剪），`buildView` 从根构建。当前层（`level`）只影响左侧面板列表、工具栏新建位置和粘贴目标。面包屑显示当前层路径，点击 = `focusLevel`（缩放视图而不切换页面）。`Esc`：先清选中，再缩放到父层。选中对象右上角显示聚焦按钮 `⤢`，`F` 快捷键 = 聚焦选中的 bounding box。`focusOn()` 自算 bbox + maxZoom 1.5。`onlyRenderVisibleElements` 始终开启。只记一个根视口（`savedViewport`）。
+- **当前层规则**：选中分区框 = 这个分区；选中表 / 图 / 便签 = 它所在的层；点画布空白 = 根；点分区框内空白 = 这个框。
 - **创建**：在哪层创建就属于哪层（工具栏、双击空白 / 框内、右键、树上 +）。新建表按所在层的命名空间补前缀 / schema。
 - **移动**：画布上把表 / 设计图 / 便签 / 分区框拖进或拖出分区框 = 剪切到那层（`items/move` → `moveItems`）；目标层命名空间不同时弹窗问"改名 / 保持原名"。树上拖拽同理（只做移动）。分区不能移到自己的子分区里。
-- **复制 / 剪切 / 粘贴**：树和画布都支持 `Ctrl+C / X / V` 与右键；剪贴板在主进程（`harness.clipboard` context key）。复制是深度复制：表按 `_copy`、`_copy2` 改名或换命名空间，副本内部外键指向副本；设计图复制文件并改 `refs`（Mermaid 代码不改写）；数据库表跳过。
+- **复制 / 剪切 / 粘贴**：树和画布都支持 `Ctrl+C / X / V` 与右键；剪贴板在主进程（`harness.clipboard` context key）。复制是深度复制：表按 `_copy`、`_copy2` 改名或换命名空间，副本内部外键指向副本；设计图复制文件并改 `refs`（Mermaid 代码不改写）；数据库表复制后粘贴成设计表（`clipboard.ts` 的 `dbSchemas/fromDb/relationOp`），剪切拒绝。粘贴到当前层（鼠标在层内 → 鼠标位置，否则 freeSpot）。
 - **命名空间**：`harness.partition.setNamespace`（树右键 / 面包屑 / 属性面板）。PostgreSQL、SQL Server、Redshift、Oracle 默认 schema，其他默认前缀；子分区不设置时继承。设置时可以选择把本层已有的表改名。画布上显示短名 + 灰色标签，同层短名冲突时回退显示真实名。
 - **删除分区画布**：连同子分区、设计表、设计图、便签、数据库表一起删除，删除前模态列出数量；编辑器打开时可 `Ctrl+Z`（设计图文件也会恢复）。
 - **自动布局**：`layoutLevel`（ELK 复合节点，`hierarchyHandling: INCLUDE_CHILDREN`，多层分区一起排）；只排选中的表时用 `layoutTables`。
@@ -273,11 +278,12 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 - 编辑：树节点上的铅笔按钮 / 右键"编辑…" → `harness.edit` → `EditPanels.open(kind, ws, id, designId?)`，kind 为 workspace / design / partition。
 - 重命名：F2 → `harness.rename` 按选中节点类型转发（含 `partition.rename`）；数据源面板中 `design/rename` 消息改设计画布名；数据库提示"名称来自连接信息"。
 
-### 5.9 设计图与同步（设计画布第一阶段）
+### 5.9 设计图与同步
 
-- **新建**：树上某层"设计图"分组的 + / 画布工具栏"+ 设计图 ▾" / 右键 → `harness.diagram.create`：选类型；ER 图可以选空白 / 全部表 / 某个 viewpoint / 挑选的表（用 `generateErDiagram` 生成）→ `design.createDiagram(text)`（独占分配 `diagramN`，`design.yml` 记 `seq.diagram`）→ `placeDiagram` 放到目标层 → 从树创建时用 `harness.diagram` 编辑器打开，从画布创建时只放卡片。
-- **画布卡片**：`DiagramNode.vue` 显示 Mermaid 预览，双击打开编辑器，右下角调整大小；删除设计图（树 / 属性面板）会删文件并移出布局，编辑器打开时可撤销。
-- **编辑器**：`CustomTextEditorProvider`，文本文档就是数据源，AI / 用户也可以直接改 `.md` 文件（"以文本打开"）。Webview 左边 Mermaid 文本（250ms 防抖回写代码块），中间 mermaid.js 预览（`securityLevel: 'strict'`），右边"与表结构的差异"。双向回写用"上次发送的文本"去重，避免吞字。
+- **新建**：树上某层"设计图"分组的 + / 画布工具栏"+ 设计图 ▾" / 右键 → `harness.diagram.create`：选类型；ER 图可以选空白 / 全部表 / 某个 viewpoint / 挑选的表（用 `generateErDiagram` 生成）→ `design.createDiagram(text)`（独占分配 `diagramN`，`design.yml` 记 `seq.diagram`）→ `placeDiagram` 放到目标层 → 选中卡片，右侧面板显示 Mermaid 文本。
+- **画布卡片**：`DiagramNode.vue` 显示 Mermaid 预览，双击 = 选中 + 右侧文本框获得焦点，右下角调整大小；删除设计图（树 / 属性面板）会删文件并移出布局，编辑器打开时可撤销。
+- **右侧编辑**（修复文档 3 R3）：选中设计图后，右侧属性面板显示 `DiagramInspector.vue`：名称、类型、说明、Mermaid 文本（`MermaidCodeEditor.vue`，行号、Tab 缩进、300ms debounce、语法错误、外部修改"重新载入"提示、`execCommand('insertText')` 保留原生 undo）、per-diagram `SyncPanel`、复制给 AI / 隐藏 / 删除 / 单独标签页。文本变化走 `diagram/code` 消息直接写盘（不进画布撤销栈），同时本地更新 `state.diagrams[i].code` 使卡片实时重渲。
+- **单独标签页编辑器**：`CustomTextEditorProvider`（`harness.diagram`），文本文档就是数据源，AI / 用户也可以直接改 `.md` 文件（"以文本打开"）。Webview 左边 Mermaid 文本（250ms 防抖回写代码块），中间 mermaid.js 预览（`securityLevel: 'strict'`），右边"与表结构的差异"。双向回写用"上次发送的文本"去重，避免吞字。保留在右键"在单独标签页中打开"和 `diagram.openInTab` 命令。
 - **差异计算**：`DiagramService.compute` = `parseDiagram` → `parseErDiagram` → `computeErSync(designDoc, er)`。范围：图里画出的实体 + frontmatter `refs`（上次同步时图里的表）；`refs` 里有但图里没画的表才会建议删除。删除类默认不勾选；没有字段块的实体只表示"引用"，不比较字段。
 - **应用**：勾选 → `prepare`（按当前文本重新检测，id 对不上就报"设计图已经变化"）→ 有删表时模态确认 → `applyDesignOps`。从画布"待同步"页签应用时走画布的撤销栈（Ctrl+Z）；从设计图编辑器应用时，面板上有一次"撤销上次同步"（校验文件没被别处改过）。成功后把图里的表写回 `refs`。
 - **忽略**：同步项 id 稳定（如 `column.add:users.email`），"忽略"写入 frontmatter `ignored`，可以"恢复"。
@@ -291,28 +297,30 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 | 方向 | type | 说明 |
 | :-- | :-- | :-- |
-| Host→Web | `init` | canvas + design(DesignContext) + sources(SourceData[]) + diagrams(DiagramData[]) + catalog + comparison + scope + clipboard |
+| Host→Web | `init` | canvas + design(DesignContext) + sources(SourceData[]) + diagrams(DiagramData[]) + catalog + comparison + clipboard |
 | Host→Web | `canvas` / `source` / `design` / `diagrams` / `comparison` / `catalog` | 增量更新 |
-| Host→Web | `scope` | 切换到某层（树点击 / reveal），可带 focus 定位某项 |
+| Host→Web | `reveal` | RevealTarget：选中并聚焦某项（item?、column?、edit?），edit = 把光标放到 Mermaid 文本 |
 | Host→Web | `clipboard` | 剪贴板状态 {mode, count}（树和画布共用） |
 | Host→Web | `reply` | 对 request 的回复 {requestId, ok, error, message?} |
-| Host→Web | `focus` | 定位到某表/字段（source + table + column?） |
+| Host→Web | `pendingSync` | 画布上各设计图的待同步项 SyncGroup[] |
 | Web→Host | `ready` | Webview 就绪，主进程随后发 init |
 | Web→Host | `canvas/edit` | 画布布局编辑（CanvasEdit） |
 | Web→Host | `design/op` | 设计编辑（DesignOp[]，可附带 canvasEdit），需要 reply |
 | Web→Host | `diff/accept` | 确认/取消确认差异，需要 reply |
-| Web→Host | `viewport`（带 scope） / `db/sync` / `openRaw` | 视口、同步数据库、打开原始文件 |
-| Web→Host | `scope` | 画布里切换了层（面包屑、双击进入、Esc） |
-| Web→Host | `clipboard/set` / `clipboard/paste` | 复制或剪切 ItemRef[] / 粘贴到某层（可带位置），paste 需要 reply |
+| Web→Host | `viewport` / `db/sync` / `openRaw` | 根视口保存、同步数据库、打开原始文件 |
+| Web→Host | `level` | 当前层变化（选中/聚焦决定，通知树跟随） |
+| Web→Host | `clipboard/set` / `clipboard/paste` | 复制或剪切 ItemRef[] / 粘贴到当前层（可带位置），paste 需要 reply |
 | Web→Host | `items/move` | 跨层移动 MoveItem[]（可能弹命名空间改名确认），需要 reply |
 | Web→Host | `partition/delete` / `partition/namespace` | 删除分区画布（需要 reply） / 设置命名空间 |
+| Web→Host | `diagram/create` | 在某层新建设计图（partition?、at?、diagramType?）；主进程 reveal {edit:true} 回来 |
+| Web→Host | `diagram/code` | 右侧面板的 Mermaid 文本变化，直接写盘（不进画布撤销栈） |
+| Web→Host | `diagram/meta` | 改设计图名称/说明 |
+| Web→Host | `diagram/openInTab` / `diagram/copyForAI` | 在单独标签页打开 / 复制给 AI |
 | Web→Host | `diagram/delete` | 删除设计图，需要 reply |
 | Web→Host | `source/add` / `source/remove` | 添加/移除设计画布引用的数据库，需要 reply |
 | Web→Host | `design/rename` | 重命名设计画布，需要 reply |
 | Web→Host | `table/copyToDesign` | 数据库表复制到设计（source + tables[] + partition? + at?），需要 reply |
-| Host→Web | `pendingSync` | 画布上各设计图的待同步项 SyncGroup[] |
 | Web→Host | `sync/apply` / `sync/ignore` | 把勾选的同步项写入表结构 / 忽略或恢复，需要 reply |
-| Web→Host | `diagram/open` / `diagram/create` | 打开设计图 / 在某层新建设计图（partition?、at?、diagramType?） |
 
 **设计图编辑器**（`src/shared/diagramProtocol.ts`）：Host→Web `init | doc | context | sync{group?, undo?} | reply`；Web→Host `ready | code | meta | sync/apply | sync/ignore | sync/undo | regenerate | command{copyForAI|openText|openCanvas}`。
 
@@ -358,7 +366,8 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | 数据库品牌图标 | `media/db/*.svg` + `workspaceTree.ts DRIVER_ICONS` |
 | 画布节点/连线/分区框/设计图卡片渲染、差异标记 | `webview-ui/src/canvas/viewModel.ts`、`components/TableNode.vue`、`PartitionNode.vue`、`DiagramNode.vue`、`CanvasView.vue` |
 | 多层自动布局（ELK 复合节点） | `canvas/layout.ts layoutLevel` |
-| 属性面板 | `components/Inspector.vue` |
+| 属性面板（选中对象） | `components/Inspector.vue`（总入口、设计表/字段/关系、分区画布、便签、空选中概况）、`DiagramInspector.vue`（设计图）、`DbTableInspector.vue`（数据库表）、`LevelContents.vue`（层内容列表） |
+| 右侧 Mermaid 编辑 | `diagram/MermaidCodeEditor.vue`（行号、Tab、防抖、错误、外部修改提示）；`diagram/mermaid.ts`（共享 loader） |
 | 连接页面 UI | `webview-ui/src/connection/*` + `dev/mockConnectionHost.ts` |
 | 编辑页面（名称、说明、设计画布类型） | `src/edit/editPanel.ts` + `shared/editProtocol.ts` + `webview-ui/src/edit/*` + `dev/mockEditHost.ts` |
 | Webview CSP / 开发服务器 | `src/webview/html.ts`、`webview-ui/vite.config.mts` |
@@ -408,7 +417,8 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 - 左侧数据源列表项没有右键复制 / 剪切，也不能直接拖到画布上（在画布或树上操作）。
 - 复制 ER 图时只改 `refs`，不改写 Mermaid 代码里的表名。
 - 缩小时简化显示（只显示表名）未做。
-- 新的嵌套画布尚未在真实 Cursor 环境中完整走查（typecheck、132 个单元测试、build 已通过）。
+- 聚焦时不淡化其他对象（只缩放视图），可在后续加"淡化其他内容"开关。
+- 修复文档 3 完成后尚未在真实 Cursor 环境中完整走查（typecheck、132 个单元测试、build 已通过）。
 
 ## 12. 相关文档
 
@@ -420,4 +430,4 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | `docs/tbls/tbls使用.md` | tbls 用法 |
 | `docs/step2initdev/01初始化/` | 阶段二：Vite HMR、工作区模型、侧边栏、画布、开发计划、实现记录 |
 | `docs/step2initdev/02新增设置/` | 自动命名（01）、连接页面（02）、tbls 能力分析（03）、开发计划（04） |
-| `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案、**第二阶段方案**（合并为设计画布、画布分区、数据库表复制）、**第二阶段修复文档**（树结构调整、显示全部表 toggle）、**第二阶段修复文档 2**（嵌套分区画布、命名空间、复制剪切、设计图卡片、面板折叠；第 5.12 节是实现与方案的偏差） |
+| `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案、**第二阶段方案**（合并为设计画布、画布分区、数据库表复制）、**第二阶段修复文档**（树结构调整、显示全部表 toggle）、**第二阶段修复文档 2**（嵌套分区画布、命名空间、复制剪切、设计图卡片、面板折叠；第 5.12 节是实现与方案的偏差）、**第二阶段修复文档 3**（R1 去掉层级切换改为聚焦、R2 聚焦按钮、R3 右侧设计图编辑、R4 右侧面板增强、R5 收尾） |

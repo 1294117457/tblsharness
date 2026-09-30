@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { DIAGRAM_TYPES, diagramTypeLabel } from '@shared/diagram';
 import type { DiagramContext, DiagramDocState } from '@shared/diagramProtocol';
 import type { SyncGroup } from '@shared/sync';
 import SyncPanel from '../components/SyncPanel.vue';
+import MermaidCodeEditor from './MermaidCodeEditor.vue';
 import MermaidPreview from './MermaidPreview.vue';
 import { onMessage, request, send } from './host';
 
@@ -15,7 +16,6 @@ const undoLabel = ref<string>();
 const code = ref('');
 const busy = ref(false);
 const notice = ref<{ text: string; level: 'info' | 'error' }>();
-const editor = ref<HTMLTextAreaElement>();
 
 const isEr = computed(() => doc.value?.meta.type === 'er');
 const syncable = computed(() => DIAGRAM_TYPES.find((t) => t.type === doc.value?.meta.type)?.syncable ?? false);
@@ -31,8 +31,7 @@ onMessage((msg) => {
       return;
     case 'doc':
       doc.value = msg.doc;
-      // Local keystrokes not yet sent are newer than any echo of what we sent before.
-      if (!sendPending && msg.doc.code !== lastSent && msg.doc.code !== code.value) code.value = msg.doc.code;
+      code.value = msg.doc.code;
       return;
     case 'context':
       context.value = msg.context;
@@ -44,19 +43,10 @@ onMessage((msg) => {
   }
 });
 
-let timer: ReturnType<typeof setTimeout> | undefined;
-let sendPending = false;
-let lastSent: string | undefined;
-watch(code, (value) => {
-  if (value === doc.value?.code) return;
-  clearTimeout(timer);
-  sendPending = true;
-  timer = setTimeout(() => {
-    sendPending = false;
-    lastSent = value;
-    send({ type: 'code', code: value });
-  }, 250);
-});
+function onCode(value: string) {
+  code.value = value;
+  send({ type: 'code', code: value });
+}
 
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 function show(text: string, level: 'info' | 'error' = 'info') {
@@ -100,16 +90,6 @@ function rename(e: Event) {
   const name = (e.target as HTMLInputElement).value.trim();
   if (name && name !== doc.value?.meta.name) send({ type: 'meta', name });
 }
-
-/** Tab inserts two spaces instead of leaving the textarea. */
-function onKeydown(e: KeyboardEvent) {
-  if (e.key !== 'Tab' || e.shiftKey) return;
-  e.preventDefault();
-  const el = editor.value!;
-  const { selectionStart: s, selectionEnd: t } = el;
-  code.value = `${code.value.slice(0, s)}  ${code.value.slice(t)}`;
-  requestAnimationFrame(() => el.setSelectionRange(s + 2, s + 2));
-}
 </script>
 
 <template>
@@ -134,14 +114,7 @@ function onKeydown(e: KeyboardEvent) {
       <main class="body">
         <section class="code-pane">
           <div class="pane-title">Mermaid</div>
-          <textarea
-            ref="editor"
-            v-model="code"
-            class="code"
-            spellcheck="false"
-            placeholder="粘贴 AI 给出的 Mermaid，或者直接编写"
-            @keydown="onKeydown"
-          />
+          <MermaidCodeEditor :code="doc.code" doc-key="doc" :debounce="250" fill @change="onCode" />
         </section>
         <section class="preview-pane">
           <MermaidPreview :code="code" />

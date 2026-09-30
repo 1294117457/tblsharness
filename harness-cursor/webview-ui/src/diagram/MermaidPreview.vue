@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { loadMermaid, shortError } from './mermaid';
 
 /** `compact`: no zoom bar, the diagram shrinks to fit (canvas cards). */
 const props = defineProps<{ code: string; compact?: boolean }>();
@@ -9,25 +10,9 @@ const error = ref('');
 const rendering = ref(false);
 const zoom = ref(1);
 
-type Mermaid = typeof import('mermaid').default;
-let mermaid: Promise<Mermaid> | undefined;
 let seq = 0;
 const uid = Math.random().toString(36).slice(2, 8);
 let timer: ReturnType<typeof setTimeout> | undefined;
-
-function isDark(): boolean {
-  const cls = document.body.classList;
-  return !cls.contains('vscode-light') && !cls.contains('vscode-high-contrast-light');
-}
-
-/** Loaded on first use: mermaid is large and only this view needs it. */
-function load(): Promise<Mermaid> {
-  mermaid ??= import('mermaid').then((m) => {
-    m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: isDark() ? 'dark' : 'default', er: { useMaxWidth: false } });
-    return m.default;
-  });
-  return mermaid;
-}
 
 async function render(code: string) {
   const mine = ++seq;
@@ -38,14 +23,14 @@ async function render(code: string) {
   }
   rendering.value = true;
   try {
-    const m = await load();
+    const m = await loadMermaid();
     const out = await m.render(`hn-mermaid-${uid}-${mine}`, code);
     if (mine !== seq) return;
     svg.value = out.svg;
     error.value = '';
   } catch (err) {
     if (mine !== seq) return;
-    error.value = (err as Error).message?.split('\n').slice(0, 4).join('\n') || String(err);
+    error.value = shortError(err);
     document.getElementById(`dhn-mermaid-${uid}-${mine}`)?.remove();
   } finally {
     if (mine === seq) rendering.value = false;
@@ -77,7 +62,7 @@ onUnmounted(() => clearTimeout(timer));
     <div class="canvas" :class="{ stale: !!error }">
       <!-- eslint-disable-next-line vue/no-v-html -- mermaid output, rendered with securityLevel strict -->
       <div class="svg" :style="compact ? undefined : { transform: `scale(${zoom})` }" v-html="svg" />
-      <p v-if="!svg && !error" class="muted empty">{{ compact ? '（空白设计图，双击打开编辑）' : '在左侧写 Mermaid，这里会显示预览。' }}</p>
+      <p v-if="!svg && !error" class="muted empty">{{ compact ? '（空白设计图，双击在右侧编辑）' : '在左侧写 Mermaid，这里会显示预览。' }}</p>
     </div>
   </div>
 </template>

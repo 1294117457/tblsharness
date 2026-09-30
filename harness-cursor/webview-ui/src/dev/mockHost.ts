@@ -42,7 +42,6 @@ let canvas: CanvasFile = {
     { source: 'db1', table: 'audit_logs', x: 320, y: 420 },
   ],
 };
-let scope: string | undefined;
 
 function send(msg: HostMessage) {
   setTimeout(() => window.postMessage(msg, '*'), 30);
@@ -137,7 +136,6 @@ function deletePartition(requestId: string, id: string) {
   if (ops.length) Object.assign(designDoc, applyDesignOps(designDoc, ops));
   send({ type: 'source', source: designSourceData() });
   send({ type: 'diagrams', diagrams: [...diagrams] });
-  if (scope && !canvas.partitions.some((p) => p.id === scope)) send({ type: 'scope', scope: (scope = undefined) });
   reply(requestId);
 }
 
@@ -151,12 +149,32 @@ function createDiagram(msg: Extract<WebviewMessage, { type: 'diagram/create' }>)
   send({ type: 'diagrams', diagrams: [...diagrams] });
   const at = msg.at ?? { x: 0, y: 0 };
   setCanvas(applyCanvasEdit(canvas, [{ op: 'diagrams.put', diagrams: [{ id, ...at, ...DIAGRAM_CARD_SIZE, partition: msg.partition }] }]));
+  send({ type: 'reveal', target: { item: { kind: 'diagram', id }, edit: true } });
+}
+
+function updateDiagram(id: string, patch: Partial<DiagramData>) {
+  const i = diagrams.findIndex((d) => d.id === id);
+  if (i < 0) return;
+  diagrams[i] = { ...diagrams[i], ...patch };
+  send({ type: 'diagrams', diagrams: [...diagrams] });
 }
 
 function handle(msg: WebviewMessage) {
   switch (msg.type) {
     case 'ready':
-      send({ type: 'init', canvas, design: designContext(), sources: allSources(), diagrams: [...diagrams], catalog: catalog(), comparison: comparison(), scope });
+      send({ type: 'init', canvas, design: designContext(), sources: allSources(), diagrams: [...diagrams], catalog: catalog(), comparison: comparison() });
+      return;
+    case 'level':
+    case 'viewport':
+      return;
+    case 'diagram/code':
+      updateDiagram(msg.diagram, { code: msg.code });
+      return;
+    case 'diagram/meta':
+      updateDiagram(msg.diagram, {
+        ...(msg.name?.trim() ? { name: msg.name.trim() } : {}),
+        ...(msg.description !== undefined ? { description: msg.description.trim() || undefined } : {}),
+      });
       return;
     case 'canvas/edit':
       canvas = applyCanvasEdit(canvas, msg.edit);
@@ -186,9 +204,6 @@ function handle(msg: WebviewMessage) {
     }
     case 'source/remove':
       reply(msg.requestId);
-      return;
-    case 'scope':
-      scope = msg.scope;
       return;
     case 'items/move':
       setCanvas(applyCanvasEdit(canvas, [{ op: 'move', items: msg.items }]));

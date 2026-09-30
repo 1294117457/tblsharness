@@ -45,6 +45,8 @@ export interface PasteContext {
   at?: Position;
   /** Positions of items without a layout entry (design tables and diagrams shown implicitly). */
   positions?: Record<string, Position>;
+  /** Snapshots of the databases whose tables are being copied; those tables become design tables. */
+  dbSchemas?: Record<string, NormalizedSchema>;
 }
 
 export class ClipboardError extends Error {}
@@ -118,8 +120,10 @@ export interface CopyPlan {
   edit: CanvasEdit;
   /** Original design table -> its copy. */
   tables: Map<string, string>;
+  /** Selected database table (node ID) -> the design table created from it. */
+  fromDb: Map<string, string>;
   diagrams: DiagramCopy[];
-  /** Database tables can only appear once per layout, so they are not copied. */
+  /** Database tables inside copied partitions (or without a snapshot) are not copied. */
   skippedDb: string[];
   partitions: string[];
 }
@@ -190,13 +194,28 @@ export function planCopy(ctx: PasteContext, items: ItemRef[]): CopyPlan {
   };
 
   const tables = new Map<string, string>();
+  const fromDb = new Map<string, string>();
   const skippedDb: string[] = [];
   const nodes: CanvasFile['nodes'] = [];
   const copiedTables: { table: NTable; to: string }[] = [];
   for (const ref of tableRefs) {
     const { source, table } = parseNodeId(ref.id);
     if (source !== DESIGN_SOURCE) {
-      skippedDb.push(ref.id);
+      const t = topKeys.has(itemKey(ref)) ? ctx.dbSchemas?.[source]?.tables.find((x) => x.key === table) : undefined;
+      if (!t) {
+        skippedDb.push(ref.id);
+        continue;
+      }
+      if (fromDb.has(ref.id)) continue;
+      const dstNs = effectiveNamespace(withParts, ctx.target);
+      const shorts = shortsAt(ctx.target);
+      const to = landingName(table, dstNs, takenReal, shorts);
+      takenReal.add(to);
+      shorts.add(shortName(dstNs, to));
+      fromDb.set(ref.id, to);
+      copiedTables.push({ table: t, to });
+      const p = positionOf(ctx, ref);
+      nodes.push({ source: DESIGN_SOURCE, table: to, x: p.x + shift.x, y: p.y + shift.y, partition: ctx.target });
       continue;
     }
     const t = byKey.get(table);
@@ -220,14 +239,15 @@ export function planCopy(ctx: PasteContext, items: ItemRef[]): CopyPlan {
   for (const { table, to } of copiedTables) ops.push(...tableOps(table, to));
   for (const r of schema.relations) {
     const from = tables.get(r.from.table);
-    if (!from) continue;
-    const to = tables.get(r.to.table) ?? r.to.table;
-    const op: DesignOp = { op: 'relation.add', from: { table: from, columns: r.from.columns }, to: { table: to, columns: r.to.columns }, kind: r.kind };
-    if (r.cardinality) op.cardinality = r.cardinality;
-    if (r.parentCardinality) op.parentCardinality = r.parentCardinality;
-    if (r.discriminator) op.discriminator = r.discriminator;
-    if (r.note) op.note = r.note;
-    ops.push(op);
+    if (from) ops.push(relationOp(r, from, tables.get(r.to.table) ?? r.to.table));
+  }
+  // Relations between database tables copied together; links to tables left behind in the database are dropped.
+  for (const [source, db] of Object.entries(ctx.dbSchemas ?? {})) {
+    for (const r of db.relations) {
+      const from = fromDb.get(nodeId(source, r.from.table));
+      const to = fromDb.get(nodeId(source, r.to.table));
+      if (from && to) ops.push(relationOp(r, from, to));
+    }
   }
   if (nodes.length) edit.push({ op: 'nodes.put', nodes });
 
@@ -263,7 +283,16 @@ export function planCopy(ctx: PasteContext, items: ItemRef[]): CopyPlan {
     });
   }
 
-  return { ops, edit, tables, diagrams, skippedDb, partitions: newPartitions.map((p) => p.id) };
+  return { ops, edit, tables, fromDb, diagrams, skippedDb, partitions: newPartitions.map((p) => p.id) };
+}
+
+function relationOp(r: NormalizedSchema['relations'][number], from: string, to: string): DesignOp {
+  const op: DesignOp = { op: 'relation.add', from: { table: from, columns: r.from.columns }, to: { table: to, columns: r.to.columns }, kind: r.kind };
+  if (r.cardinality) op.cardinality = r.cardinality;
+  if (r.parentCardinality) op.parentCardinality = r.parentCardinality;
+  if (r.discriminator) op.discriminator = r.discriminator;
+  if (r.note) op.note = r.note;
+  return op;
 }
 
 /** Design tables shown at a level (implicit tables without a layout entry sit at the root). */
@@ -297,6 +326,9 @@ export interface CutPlan {
 /** Moves items to the target level. With `rename`, tables adopt the target namespace and the edit uses the new names. */
 export function planCut(ctx: PasteContext, items: ItemRef[], rename: boolean): CutPlan {
   const { canvas, schema } = ctx;
+  if (items.some((r) => r.kind === 'table' && parseNodeId(r.id).source !== DESIGN_SOURCE)) {
+    throw new ClipboardError('数据库表只能复制（粘贴后成为设计表），不能剪切');
+  }
   const top = topLevelItems(canvas, items).filter((r) => partitionOf(canvas, r) !== ctx.target || !!ctx.at);
   assertTarget(ctx, top, '移动');
   const shift = shiftFor(ctx, top, false);

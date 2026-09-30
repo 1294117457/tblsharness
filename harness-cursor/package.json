@@ -127,7 +127,12 @@
       },
       {
         "command": "harness.diagram.open",
-        "title": "打开设计图",
+        "title": "在画布中定位",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.diagram.openInTab",
+        "title": "在单独标签页中打开",
         "category": "Harness"
       },
       {
@@ -200,7 +205,7 @@
       },
       {
         "command": "harness.partition.open",
-        "title": "打开分区画布",
+        "title": "在画布中定位",
         "category": "Harness"
       },
       {
@@ -497,9 +502,14 @@
           "group": "1_open@1"
         },
         {
-          "command": "harness.diagram.openText",
+          "command": "harness.diagram.openInTab",
           "when": "view == harness.workspaces && viewItem == diagram",
           "group": "1_open@2"
+        },
+        {
+          "command": "harness.diagram.openText",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "1_open@3"
         },
         {
           "command": "harness.diagram.copyForAI",

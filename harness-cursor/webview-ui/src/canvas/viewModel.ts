@@ -64,7 +64,7 @@ export interface PartitionView {
   id: string;
   name: string;
   description?: string;
-  /** Parent frame on screen; `undefined` when it sits directly on the level being shown. */
+  /** Parent frame; `undefined` on the root canvas. */
   parent?: string;
   depth: number;
   collapsed: boolean;
@@ -108,24 +108,38 @@ export interface LevelDiagram {
   hidden: boolean;
 }
 
+export interface LevelContent {
+  tables: LevelTable[];
+  diagrams: LevelDiagram[];
+  /** Database tables shown at this level, by source. */
+  db: Record<string, Set<string>>;
+  /** Database tables placed on other levels, by source. */
+  dbElsewhere: Record<string, Set<string>>;
+}
+
 export interface CanvasView {
-  scope?: string;
-  /** Rendered items: the level itself plus the content of expanded partitions inside it. */
+  /** Rendered items: the whole canvas, except the content of collapsed partitions. */
   tables: TableView[];
   edges: EdgeView[];
   /** Parents before children, as Vue Flow requires. */
   partitions: PartitionView[];
   diagrams: DiagramView[];
   notes: NoteView[];
-  /** What the source panel lists: the current level only. */
-  level: {
-    tables: LevelTable[];
-    diagrams: LevelDiagram[];
-    /** Database tables shown at this level, by source. */
-    db: Record<string, Set<string>>;
-    /** Database tables placed on other levels, by source. */
-    dbElsewhere: Record<string, Set<string>>;
-  };
+  /** What each level contains, hidden items included; keyed by partition ID, `''` for the root. */
+  levels: Map<string, { tables: LevelTable[]; diagrams: LevelDiagram[]; db: Record<string, Set<string>> }>;
+  /** Every database table placed on the canvas: source → table → level (`''` for the root). */
+  dbPlaced: Record<string, Map<string, string>>;
+}
+
+/** What the source panel lists for one level. */
+export function levelContent(view: CanvasView, level: string | undefined): LevelContent {
+  const key = level ?? '';
+  const own = view.levels.get(key);
+  const dbElsewhere: Record<string, Set<string>> = {};
+  for (const [src, placed] of Object.entries(view.dbPlaced)) {
+    for (const [table, at] of placed) if (at !== key) (dbElsewhere[src] ??= new Set()).add(table);
+  }
+  return { tables: own?.tables ?? [], diagrams: own?.diagrams ?? [], db: own?.db ?? {}, dbElsewhere };
 }
 
 export const TABLE_HANDLE = '__table';
@@ -155,7 +169,6 @@ export function buildView(
   sources: Record<string, SourceData>,
   comparison: ComparisonData | undefined,
   diagramData: DiagramData[],
-  scope: string | undefined,
 ): CanvasView {
   const byPart = new Map(canvas.partitions.map((p) => [p.id, p]));
   const childrenOf = new Map<string | undefined, string[]>();
@@ -163,17 +176,17 @@ export function buildView(
 
   // Frames on screen, parents first; `open` = levels whose content is rendered.
   const shownParts: { id: string; parent?: string; depth: number }[] = [];
-  const open = new Set<string | undefined>([scope]);
+  const open = new Set<string | undefined>([undefined]);
   const walk = (parent: string | undefined, depth: number) => {
     for (const id of childrenOf.get(parent) ?? []) {
-      shownParts.push({ id, parent: parent === scope ? undefined : parent, depth });
+      shownParts.push({ id, parent, depth });
       if (!byPart.get(id)!.collapsed) {
         open.add(id);
         walk(id, depth + 1);
       }
     }
   };
-  walk(scope, 1);
+  walk(undefined, 1);
 
   const placed = new Map(canvas.nodes.map((n) => [nodeId(n.source, n.table), n]));
   const placement = (id: string): Placement => {
@@ -185,9 +198,14 @@ export function buildView(
   sourceIds.add(DESIGN_SOURCE);
 
   const tables = new Map<string, TableView>();
-  const levelTables: LevelTable[] = [];
-  const levelDb: Record<string, Set<string>> = {};
-  const dbElsewhere: Record<string, Set<string>> = {};
+  const levels: CanvasView['levels'] = new Map();
+  const levelOf = (level: string | undefined) => {
+    const key = level ?? '';
+    let entry = levels.get(key);
+    if (!entry) levels.set(key, (entry = { tables: [], diagrams: [], db: {} }));
+    return entry;
+  };
+  const dbPlaced: CanvasView['dbPlaced'] = {};
   const nsCache = new Map<string | undefined, ReturnType<typeof effectiveNamespace>>();
   const nsAt = (level: string | undefined) => {
     if (!nsCache.has(level)) nsCache.set(level, effectiveNamespace(canvas, level));
@@ -211,11 +229,10 @@ export function buildView(
       const ns = isDesign ? nsAt(level) : undefined;
       const displayName = shortName(ns, key);
       const namespaceTag = ns && inNamespace(ns, key) ? namespaceLabel(ns) : undefined;
-      if (level === scope) {
-        if (isDesign) levelTables.push({ key, displayName, namespaceTag, comment: byKey.get(key)?.comment, hidden: p.hidden });
-        else if (!p.hidden) (levelDb[src] ??= new Set()).add(key);
-      } else if (!isDesign) {
-        (dbElsewhere[src] ??= new Set()).add(key);
+      if (isDesign) levelOf(level).tables.push({ key, displayName, namespaceTag, comment: byKey.get(key)?.comment, hidden: p.hidden });
+      else {
+        (dbPlaced[src] ??= new Map()).set(key, level ?? '');
+        if (!p.hidden) (levelOf(level).db[src] ??= new Set()).add(key);
       }
       if (p.hidden || !open.has(level)) continue;
       const display = placed.get(id)?.display ?? canvas.settings.columnDisplay;
@@ -232,7 +249,7 @@ export function buildView(
     [...tables.values()].filter((t) => t.sourceKind === 'design'),
     (t) => t.partition ?? '',
   );
-  dedupeDisplayNames(levelTables, () => '');
+  for (const entry of levels.values()) dedupeDisplayNames(entry.tables, () => '');
 
   const edges: EdgeView[] = [];
   const c = canvas.comparison;
@@ -265,11 +282,10 @@ export function buildView(
   // Diagrams
   const diagramEntries = new Map(canvas.diagrams.map((d) => [d.id, d]));
   const diagrams: DiagramView[] = [];
-  const levelDiagrams: LevelDiagram[] = [];
   for (const d of diagramData) {
     const entry = diagramEntries.get(d.id);
     const level = entry?.partition;
-    if (level === scope) levelDiagrams.push({ id: d.id, name: d.name, type: d.type, hidden: !!entry?.hidden });
+    levelOf(level).diagrams.push({ id: d.id, name: d.name, type: d.type, hidden: !!entry?.hidden });
     if (entry?.hidden || !open.has(level)) continue;
     diagrams.push({
       id: d.id,
@@ -342,15 +358,7 @@ export function buildView(
     };
   });
 
-  return {
-    scope,
-    tables: visible,
-    edges,
-    partitions,
-    diagrams,
-    notes,
-    level: { tables: levelTables, diagrams: levelDiagrams, db: levelDb, dbElsewhere },
-  };
+  return { tables: visible, edges, partitions, diagrams, notes, levels, dbPlaced };
 }
 
 /** Two design tables on one level must not look the same: a shortened name that collides shows the real name. */

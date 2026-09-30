@@ -7,9 +7,8 @@ import {
   DIAGRAM_CARD_SIZE,
   nodeId,
   parseCanvas,
+  parseNodeId,
   partitionContents,
-  partitionOf,
-  partitionPath,
   renameTableInCanvas,
   ROOT_SCOPE,
   serializeCanvas,
@@ -23,7 +22,7 @@ import { ClipboardError, planCopy, planCut, type ClipboardData, type Position } 
 import { copyTableOps, type ConflictStrategy } from '../shared/copyTables';
 import { serializeDiagram } from '../shared/diagram';
 import { applyDesignOps, DesignOpError, serializeDesign, type DesignOp } from '../shared/designOps';
-import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, HostMessage, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
+import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, HostMessage, RevealTarget, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
 import { SyncError } from '../shared/sync';
 import { readTextIfExists, writeText } from '../workspace/fsUtil';
 import { renameDesignTable, type OpenCanvasRegistry } from '../workspace/refactor';
@@ -61,7 +60,7 @@ export class CanvasDocument implements vscode.CustomDocument {
     readonly workspaceId: string | undefined,
     readonly designId: string | undefined,
   ) {
-    this.viewports = { ...(state.viewports ?? {}) };
+    this.viewports = rootViewport(state);
   }
 
   get isDirty(): boolean {
@@ -163,7 +162,7 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
 
   async revertCustomDocument(document: CanvasDocument): Promise<void> {
     const canvas = parseCanvas((await readTextIfExists(document.uri)) ?? '');
-    document.viewports = { ...(canvas.viewports ?? {}) };
+    document.viewports = rootViewport(canvas);
     document.markSaved();
     document.setState(canvas, true);
   }
@@ -222,19 +221,15 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     return !!this.session(workspace, design);
   }
 
-  /** Opens the design's single editor tab and switches it to a level (`undefined` = root). */
-  async open(workspace: string, design: string, scope?: string, focus?: ItemRef): Promise<void> {
+  /** Opens the design's single editor tab; with a target, selects it and zooms the canvas to it. */
+  async open(workspace: string, design: string, target?: RevealTarget): Promise<void> {
     const uri = await this.storage.workspace(workspace).design(design).ensureLayout();
     await vscode.commands.executeCommand('vscode.openWith', uri, CANVAS_VIEW_TYPE);
-    this.sessions.get(uri.toString())?.setScope(scope, focus);
+    if (target) this.sessions.get(uri.toString())?.reveal(target);
   }
 
-  /** Opens the level a design table sits in and focuses it. */
   async revealTable(workspace: string, design: string, source: string, table: string, column?: string): Promise<void> {
-    const canvas = await this.layout(workspace, design);
-    const ref: ItemRef = { kind: 'table', id: nodeId(source, table) };
-    await this.open(workspace, design, partitionOf(canvas, ref), ref);
-    this.session(workspace, design)?.focus({ source, table, column });
+    await this.open(workspace, design, { item: { kind: 'table', id: nodeId(source, table) }, column });
   }
 
   /** Applies a design change: through the open editor (undoable) or straight to disk. Returns an error message. */
@@ -340,7 +335,13 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
       return rename ? `已移动，并改名 ${plan.renames.length} 张表` : '已移动';
     }
 
-    const plan = planCopy(ctx, items);
+    const dbSchemas: Record<string, NonNullable<typeof schema>> = {};
+    for (const source of new Set(items.filter((i) => i.kind === 'table').map((i) => parseNodeId(i.id).source))) {
+      if (source === DESIGN_SOURCE) continue;
+      const db = (await this.store.source(workspace, 'db', source)).schema;
+      if (db) dbSchemas[source] = db;
+    }
+    const plan = planCopy({ ...ctx, dbSchemas }, items);
     const d = this.storage.workspace(workspace).design(design);
     const created: { id: string; text: string }[] = [];
     for (const copy of plan.diagrams) {
@@ -373,8 +374,13 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
       await files?.undo();
       throw new Error(error);
     }
-    const parts = [plan.partitions.length && `${plan.partitions.length} 个分区画布`, plan.tables.size && `${plan.tables.size} 张表`, created.length && `${created.length} 张设计图`].filter(Boolean);
-    const skipped = plan.skippedDb.length ? `；${plan.skippedDb.length} 张数据库表每个画布只能出现一次，没有复制` : '';
+    const parts = [
+      plan.partitions.length && `${plan.partitions.length} 个分区画布`,
+      plan.tables.size && `${plan.tables.size} 张表`,
+      plan.fromDb.size && `${plan.fromDb.size} 张数据库表（已成为设计表）`,
+      created.length && `${created.length} 张设计图`,
+    ].filter(Boolean);
+    const skipped = plan.skippedDb.length ? `；分区里的 ${plan.skippedDb.length} 张数据库表没有复制（数据库表在一个画布里只能出现一次）` : '';
     return `已粘贴 ${parts.join('、') || '便签'}${skipped}`;
   }
 
@@ -388,7 +394,8 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
     for (const m of moves) targets.set(m.partition ?? '', [...(targets.get(m.partition ?? '') ?? []), m]);
     const renames: { from: string; to: string }[] = [];
     for (const [target, group] of targets) {
-      renames.push(...planCut({ canvas, schema, target: target || undefined, at: { x: 0, y: 0 } }, group, false).renames);
+      const designItems = group.filter((m) => m.kind !== 'table' || m.id.startsWith(`${DESIGN_SOURCE}/`));
+      if (designItems.length) renames.push(...planCut({ canvas, schema, target: target || undefined, at: { x: 0, y: 0 } }, designItems, false).renames);
     }
     let rename = false;
     if (renames.length) {
@@ -531,6 +538,12 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
   }
 }
 
+/** The canvas is one surface now; per-level viewports from older files are dropped. */
+function rootViewport(canvas: CanvasFile): Record<string, Viewport> {
+  const root = canvas.viewports?.[ROOT_SCOPE];
+  return root ? { [ROOT_SCOPE]: root } : {};
+}
+
 function preview(names: string[]): string {
   return names.length > 8 ? `${names.slice(0, 8).join('、')} 等` : names.join('、');
 }
@@ -552,12 +565,11 @@ export function placeNear(canvas: CanvasFile, diagram: string, tables: string[])
 class CanvasSession implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private ready = false;
-  private pendingFocus: { source: string; table: string; column?: string } | undefined;
-  private pendingScope: { scope?: string; focus?: ItemRef } | undefined;
+  private pendingReveal: RevealTarget | undefined;
   private sentSources = new Set<string>();
   private sentComparison = '';
   private sentDiagrams = '';
-  scope: string | undefined;
+  level: string | undefined;
 
   constructor(
     private readonly provider: CanvasEditorProvider,
@@ -592,15 +604,9 @@ class CanvasSession implements vscode.Disposable {
     if (meta) this.panel.title = meta.name;
   }
 
-  focus(target: { source: string; table: string; column?: string }): void {
-    if (this.ready) this.post({ type: 'focus', ...target });
-    else this.pendingFocus = target;
-  }
-
-  setScope(scope: string | undefined, focus?: ItemRef): void {
-    this.scope = scope;
-    if (this.ready) this.post({ type: 'scope', scope, focus });
-    else this.pendingScope = { scope, focus };
+  reveal(target: RevealTarget): void {
+    if (this.ready) this.post({ type: 'reveal', target });
+    else this.pendingReveal = target;
   }
 
   pushClipboard(): void {
@@ -692,19 +698,16 @@ class CanvasSession implements vscode.Disposable {
       switch (msg.type) {
         case 'ready':
           this.ready = true;
-          if (this.pendingScope) this.scope = this.pendingScope.scope;
           await this.sendInit();
-          if (this.pendingScope?.focus) this.post({ type: 'scope', scope: this.scope, focus: this.pendingScope.focus });
-          this.pendingScope = undefined;
-          if (this.pendingFocus) {
-            this.post({ type: 'focus', ...this.pendingFocus });
-            this.pendingFocus = undefined;
+          if (this.pendingReveal) {
+            this.post({ type: 'reveal', target: this.pendingReveal });
+            this.pendingReveal = undefined;
           }
           this.sentPending = '';
           await this.pushPending();
           return;
-        case 'scope':
-          this.scope = msg.scope;
+        case 'level':
+          this.level = msg.level;
           return;
         case 'sync/apply': {
           const ref: DiagramRef = { workspace: this.workspaceId ?? '', design: this.designId ?? '', diagram: msg.diagram };
@@ -717,9 +720,22 @@ class CanvasSession implements vscode.Disposable {
           this.schedulePending();
           return;
         }
-        case 'diagram/open':
-          await vscode.commands.executeCommand('harness.diagram.open', { kind: 'diagram', workspace: this.workspaceId, design: this.designId, id: msg.diagram });
+        case 'diagram/openInTab':
+          await vscode.commands.executeCommand('harness.diagram.openInTab', this.diagramArg(msg.diagram));
           return;
+        case 'diagram/copyForAI':
+          await vscode.commands.executeCommand('harness.diagram.copyForAI', this.diagramArg(msg.diagram));
+          return;
+        case 'diagram/code':
+          return await this.writeDiagram(msg.diagram, (f) => (f.code === msg.code ? f : { ...f, code: msg.code }));
+        case 'diagram/meta':
+          return await this.writeDiagram(msg.diagram, (f) => {
+            const meta = { ...f.meta };
+            const name = msg.name?.trim();
+            if (name) meta.name = name;
+            if (msg.description !== undefined) meta.description = msg.description.trim() || undefined;
+            return JSON.stringify(meta) === JSON.stringify(f.meta) ? f : { ...f, meta };
+          });
         case 'diagram/create':
           await vscode.commands.executeCommand('harness.diagram.create', {
             kind: 'design',
@@ -728,7 +744,6 @@ class CanvasSession implements vscode.Disposable {
             type: msg.diagramType,
             partition: msg.partition,
             at: msg.at,
-            fromCanvas: true,
           });
           return;
         case 'diagram/delete':
@@ -743,7 +758,7 @@ class CanvasSession implements vscode.Disposable {
         case 'diff/accept':
           return await this.acceptDiff(msg.requestId, msg.id, msg.accepted);
         case 'viewport':
-          this.document.viewports = { ...this.document.viewports, [msg.scope || ROOT_SCOPE]: msg.viewport };
+          this.document.viewports = { [ROOT_SCOPE]: msg.viewport };
           return;
         case 'db/sync':
           if (msg.source !== DESIGN_SOURCE) await vscode.commands.executeCommand('harness.db.sync', { workspace: this.workspaceId, id: msg.source });
@@ -777,6 +792,23 @@ class CanvasSession implements vscode.Disposable {
     } catch (err) {
       vscode.window.showErrorMessage(`Harness：${(err as Error).message}`);
     }
+  }
+
+  private diagramWrites: Promise<void> = Promise.resolve();
+
+  /** Side-panel edits are written one after another so fast typing cannot interleave read-modify-write cycles. */
+  private writeDiagram(diagram: string, fn: Parameters<DiagramService['modify']>[1]): Promise<void> {
+    const run = this.diagramWrites.then(() => this.provider.diagrams.modify(this.diagramRef(diagram), fn));
+    this.diagramWrites = run.catch(() => undefined);
+    return run;
+  }
+
+  private diagramRef(diagram: string): DiagramRef {
+    return { workspace: this.workspaceId ?? '', design: this.designId ?? '', diagram };
+  }
+
+  private diagramArg(diagram: string) {
+    return { kind: 'diagram', workspace: this.workspaceId, design: this.designId, id: diagram };
   }
 
   private async guarded(requestId: string, run: () => Promise<string | undefined>): Promise<void> {
@@ -817,7 +849,6 @@ class CanvasSession implements vscode.Disposable {
       diagrams,
       catalog: await this.catalog(),
       comparison,
-      scope: this.scope && partitionPath(this.document.state, this.scope).length ? this.scope : undefined,
       clipboard: this.provider.clipboardInfo(this.workspaceId, this.designId),
     });
   }

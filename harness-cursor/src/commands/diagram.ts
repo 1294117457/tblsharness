@@ -12,8 +12,6 @@ export interface DiagramCreateArg extends NodeArg {
   blank?: boolean;
   /** Where the card goes on the canvas. */
   at?: { x: number; y: number };
-  /** Created from the canvas toolbar: the card appears there, so the diagram editor is not opened. */
-  fromCanvas?: boolean;
 }
 
 export function registerDiagramCommands(h: Harness): void {
@@ -73,10 +71,16 @@ export function registerDiagramCommands(h: Harness): void {
     h.store.invalidate({ workspace: ws.id, kind: 'diagram', id: design, diagram: id });
     await h.canvases.placeDiagram(ws.id, design, id, partition, arg?.at);
     void revealInTree(h, { kind: 'diagram', workspace: ws.id, design, id, partition });
-    if (!arg?.fromCanvas) await openDiagram(ws.design(design).diagramUri(id));
+    await h.canvases.open(ws.id, design, { item: { kind: 'diagram', id }, edit: true });
   });
 
+  /** Shows the card on the design canvas; the text is edited in the canvas's right panel. */
   register(h, 'harness.diagram.open', async (arg) => {
+    const { ref } = await diagramFromArg(h, arg);
+    await h.canvases.open(ref.workspace, ref.design, { item: { kind: 'diagram', id: ref.diagram } });
+  });
+
+  register(h, 'harness.diagram.openInTab', async (arg) => {
     const { uri } = await diagramFromArg(h, arg);
     await openDiagram(uri);
   });

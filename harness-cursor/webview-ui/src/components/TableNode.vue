@@ -4,6 +4,7 @@ import { Handle, Position } from '@vue-flow/core';
 import { TABLE_HANDLE, type TableView } from '../canvas/viewModel';
 import { HEADER_HEIGHT, NODE_WIDTH, ROW_HEIGHT } from '../canvas/layout';
 import { state } from '../store';
+import FocusButton from './FocusButton.vue';
 
 const props = defineProps<{ data: TableView; selected?: boolean }>();
 
@@ -31,6 +32,7 @@ const hiddenCount = computed(() => props.data.columns.length - props.data.visibl
       <span class="badge" :title="data.sourceKind === 'db' ? '数据库（只读）' : '设计库'">
         <span v-if="data.sourceKind === 'db'" class="lock">🔒</span>{{ data.sourceName }}
       </span>
+      <FocusButton v-if="selected" :item="{ kind: 'table', id: data.id }" />
       <Handle :id="`${TABLE_HANDLE}:s`" type="source" :position="Position.Right" class="handle" :connectable="false" />
     </div>
     <div v-if="data.missing" class="missing-note">数据源中已没有这张表</div>

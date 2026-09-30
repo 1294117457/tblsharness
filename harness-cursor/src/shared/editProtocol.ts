@@ -1,4 +1,4 @@
-export type EditKind = 'workspace' | 'design' | 'canvas';
+export type EditKind = 'workspace' | 'design' | 'partition';
 
 export interface EditInit {
   kind: EditKind;

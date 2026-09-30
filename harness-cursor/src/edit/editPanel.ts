@@ -1,23 +1,22 @@
 import * as vscode from 'vscode';
 import type { Harness } from '../commands/common';
 import { LAST_DESIGN_DRIVER_KEY } from '../commands/design';
-import { parseCanvas, serializeCanvas, type CanvasFile } from '../shared/canvas';
 import type { EditHostMessage, EditInit, EditKind, EditValues, EditWebviewMessage } from '../shared/editProtocol';
 import { DESIGN_DRIVERS, driverLabel } from '../shared/workspace';
-import { readText, writeText } from '../workspace/fsUtil';
 import type { HarnessWorkspace } from '../workspace/storage';
 import { renderWebviewHtml, webviewOptions } from '../webview/html';
 
-const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计画布', canvas: '画布' };
+const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计画布', partition: '分区画布' };
 
-/** One edit page per workspace / design / canvas; opening it again just focuses it. */
+/** One edit page per workspace / design / partition; opening it again just focuses it. */
 export class EditPanels implements vscode.Disposable {
   private readonly panels = new Map<string, EditPanel>();
 
   constructor(readonly h: Harness) {}
 
+  /** For a partition, `id` is the partition ID and `designId` the design it lives in. */
   open(kind: EditKind, ws: HarnessWorkspace, id?: string, designId?: string): void {
-    const key = `${kind}:${ws.id}:${id ?? ''}`;
+    const key = `${kind}:${ws.id}:${designId ?? ''}:${id ?? ''}`;
     const existing = this.panels.get(key);
     if (existing) {
       existing.panel.reveal();
@@ -86,13 +85,11 @@ class EditPanel implements vscode.Disposable {
     }
   }
 
-  private get canvasUri(): vscode.Uri {
-    const did = this.designId ?? this.id!;
-    return this.ws.design(did).canvasUri(this.id!);
-  }
-
-  private async readCanvas(): Promise<CanvasFile> {
-    return this.h.canvases.openDocument(this.canvasUri)?.state ?? parseCanvas(await readText(this.canvasUri));
+  private async partition() {
+    const layout = await this.h.canvases.layout(this.ws.id, this.designId!);
+    const p = layout.partitions.find((x) => x.id === this.id);
+    if (!p) throw new Error('分区画布不存在');
+    return p;
   }
 
   private async load(): Promise<EditInit> {
@@ -100,9 +97,9 @@ class EditPanel implements vscode.Disposable {
     switch (this.kind) {
       case 'workspace':
         return { kind: 'workspace', workspaceName: wsMeta.name, name: wsMeta.name, description: wsMeta.description };
-      case 'canvas': {
-        const canvas = await this.readCanvas();
-        return { kind: 'canvas', workspaceName: wsMeta.name, name: canvas.name, description: canvas.description };
+      case 'partition': {
+        const p = await this.partition();
+        return { kind: 'partition', workspaceName: wsMeta.name, name: p.name, description: p.description };
       }
       case 'design': {
         const meta = await this.ws.design(this.id!).readMeta();
@@ -133,14 +130,12 @@ class EditPanel implements vscode.Disposable {
         this.h.store.invalidate({ workspace: this.ws.id, kind: 'workspace' });
         return;
       }
-      case 'canvas': {
-        const update = (c: CanvasFile) => (c.name === name && c.description === description ? c : { ...c, name, description });
-        if (!this.h.canvases.transformIfOpen(this.canvasUri, update)) {
-          const current = parseCanvas(await readText(this.canvasUri));
-          const next = update(current);
-          if (next !== current) await writeText(this.canvasUri, serializeCanvas(next));
-        }
-        this.h.store.invalidate({ workspace: this.ws.id, kind: 'canvas', id: this.id, design: this.designId });
+      case 'partition': {
+        const p = await this.partition();
+        if (p.name === name && p.description === description) return;
+        const next = { ...p, name, description };
+        if (!description) delete next.description;
+        await this.h.canvases.editLayout(this.ws.id, this.designId!, '编辑分区画布', [{ op: 'partition.put', partition: next }]);
         return;
       }
       case 'design': {

@@ -204,6 +204,6 @@ function cacheKey(workspace: string, kind: SourceKind, id: string, snapshot?: st
 function toChange(located: Located): StoreChange {
   if (!located.kind) return { workspace: located.workspace, kind: 'workspace' };
   if (located.kind === 'diagram') return { workspace: located.workspace, kind: 'diagram', id: located.id, design: located.id, diagram: located.diagram };
-  if (located.kind === 'canvas') return { workspace: located.workspace, kind: 'canvas', id: located.canvas ?? located.id, design: located.design };
+  if (located.kind === 'canvas') return { workspace: located.workspace, kind: 'canvas', id: located.id, design: located.design ?? located.id };
   return { workspace: located.workspace, kind: located.kind, id: located.id };
 }

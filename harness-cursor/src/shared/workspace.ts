@@ -25,10 +25,8 @@ export interface DesignMeta {
   createdFrom?: { kind: 'empty' } | { kind: 'db'; source: string; snapshot: string } | { kind: 'file'; path: string };
   /** Database IDs referenced by this design (画布 can show their tables). */
   sources?: string[];
-  /** Last number handed out per sub-kind inside this design. */
-  seq?: { canvas?: number; diagram?: number };
-  /** Canvas ID last opened; used to decide which canvas to open when clicking the design node. */
-  lastCanvas?: string;
+  /** Last diagram number handed out inside this design. Partition numbers live in `layout.json`. */
+  seq?: { diagram?: number };
 }
 
 
@@ -95,11 +93,10 @@ export function driverLabel(name: string | undefined): string | undefined {
   return DESIGN_DRIVERS.find((d) => d.name === name)?.label ?? name;
 }
 
-export const ID_PREFIX: Record<SeqKind | 'workspace' | 'canvas' | 'diagram', string> = {
+export const ID_PREFIX: Record<SeqKind | 'workspace' | 'diagram', string> = {
   workspace: 'workspace',
   design: 'design',
   db: 'db',
-  canvas: 'canvas',
   diagram: 'diagram',
 };
 

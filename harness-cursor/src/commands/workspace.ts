@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { emptyDesignSchema, emptyExt } from '../shared/designOps';
-import { emptyCanvas, serializeCanvas } from '../shared/canvas';
 import { nextDefaultName } from '../shared/workspace';
 import type { TreeNode } from '../views/workspaceTree';
 import { removeRecursive } from '../workspace/fsUtil';
@@ -12,11 +11,7 @@ export function registerWorkspaceCommands(h: Harness): void {
     const ws = await h.storage.createWorkspace(name);
     const designName = '设计画布 1';
     const doc = { schema: emptyDesignSchema(designName, 'postgres'), ext: emptyExt() };
-    const designId = await ws.createDesign({ version: 1, name: designName }, doc);
-    const design = ws.design(designId);
-    const canvas = emptyCanvas('画布 1');
-    canvas.designTables = 'all';
-    await design.createCanvas(serializeCanvas(canvas));
+    await ws.createDesign({ version: 1, name: designName }, doc);
     h.store.invalidate({});
     void revealInTree(h, { kind: 'workspace', workspace: ws.id });
     void vscode.window.showInformationMessage(`已创建${name}，按 F2 可以重命名。`);
@@ -35,11 +30,9 @@ export function registerWorkspaceCommands(h: Harness): void {
     const meta = await ws.readMeta();
     const designIds = await ws.designIds();
     const dbIds = await ws.dbIds();
-    let canvasCount = 0;
-    for (const did of designIds) canvasCount += (await ws.design(did).canvasIds()).length;
     await confirm(
       `确定删除工作区"${meta.name}"吗？`,
-      `将删除 ${designIds.length} 个设计画布、${dbIds.length} 个数据库（含快照和已保存的连接）、${canvasCount} 个画布。此操作不能撤销。`,
+      `将删除 ${designIds.length} 个设计画布（含分区画布和设计图）、${dbIds.length} 个数据库（含快照和已保存的连接）。此操作不能撤销。`,
       '删除',
     );
     await closeTabsUnder(ws.dir);
@@ -74,8 +67,8 @@ export function registerWorkspaceCommands(h: Harness): void {
     const commands: Partial<Record<TreeNode['kind'], string>> = {
       workspace: 'harness.workspace.rename',
       design: 'harness.design.rename',
-      canvas: 'harness.canvas.rename',
       diagram: 'harness.diagram.rename',
+      partition: 'harness.partition.rename',
     };
     const command = commands[node.kind];
     if (command) await vscode.commands.executeCommand(command, node);
@@ -86,9 +79,10 @@ export function registerWorkspaceCommands(h: Harness): void {
     const node = (arg as TreeNode | undefined) ?? h.treeView.selection[0];
     if (!node) return;
     if (node.kind === 'db') return vscode.commands.executeCommand('harness.db.editConnection', node);
-    if (node.kind !== 'workspace' && node.kind !== 'design' && node.kind !== 'canvas') return;
-    const ws = await pickWorkspace(h, node);
-    h.editors.open(node.kind, ws, node.kind === 'workspace' ? undefined : node.id, 'design' in node ? (node as { design: string }).design : undefined);
+    const ws = h.storage.workspace(node.workspace);
+    if (node.kind === 'workspace') h.editors.open('workspace', ws);
+    else if (node.kind === 'design') h.editors.open('design', ws, node.id);
+    else if (node.kind === 'partition') h.editors.open('partition', ws, node.id, node.design);
   });
 
   register(h, 'harness.refresh', () => h.store.invalidate({}));

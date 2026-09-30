@@ -1,24 +1,28 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, shallowRef, watch } from 'vue';
-import { ConnectionMode, MarkerType, VueFlow, useVueFlow, type Connection, type Edge, type Node } from '@vue-flow/core';
+import { ConnectionMode, MarkerType, VueFlow, useVueFlow, type Connection, type Edge, type GraphNode, type Node } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
-import { nodeId as makeNodeId, parseNodeId, type CanvasEdit, type CanvasFile, type CanvasNote } from '@shared/canvas';
+import { nodeId as makeNodeId, parseNodeId, partitionSubtree, type CanvasEdit, type CanvasFile, type MoveItem } from '@shared/canvas';
 import type { RelationKind } from '@shared/model';
-import { layoutTables, layoutWithZones, placeNewTables, type Position } from '../canvas/layout';
-import type { CanvasView, EdgeView, Mark, ZoneView } from '../canvas/viewModel';
-import { editCanvas, state } from '../store';
+import { layoutLevel, layoutTables, placeNewTables, NODE_WIDTH, PART_HEADER, type Position } from '../canvas/layout';
+import type { CanvasView, EdgeView, Mark } from '../canvas/viewModel';
+import { editCanvas, itemOfFlowId, moveItems, scopeKey, state, viewports } from '../store';
 import { post } from '../vscode';
+import DiagramNode from './DiagramNode.vue';
 import NoteNode from './NoteNode.vue';
+import PartitionNode from './PartitionNode.vue';
 import TableNode from './TableNode.vue';
-import ZoneNode from './ZoneNode.vue';
 
 const props = defineProps<{ view: CanvasView; canvas: CanvasFile }>();
 const emit = defineEmits<{
   connect: [connection: Connection];
-  'create-table': [position: Position];
-  'node-menu': [payload: { nodeId: string; x: number; y: number }];
-  'rename-zone': [id: string];
+  /** `partition` is the level to create in; the position is relative to it. */
+  'create-table': [partition: string | undefined, position: Position];
+  'node-menu': [payload: { id: string; x: number; y: number; flow: Position }];
+  'pane-menu': [payload: { x: number; y: number; flow: Position }];
+  enter: [partition: string];
+  pending: [diagram: string];
 }>();
 
 const FLOW_ID = 'harness-canvas';
@@ -27,11 +31,15 @@ const {
   setViewport,
   screenToFlowCoordinate,
   getSelectedNodes,
+  findNode,
+  onNodeDrag,
   onNodeDragStop,
   onConnect,
   onNodeClick,
+  onNodeDoubleClick,
   onEdgeClick,
   onPaneClick,
+  onPaneContextMenu,
   onMoveEnd,
   onNodeContextMenu,
   onNodesInitialized,
@@ -39,14 +47,51 @@ const {
 
 const nodes = shallowRef<Node[]>([]);
 const edges = shallowRef<Edge[]>([]);
-/** Positions for tables shown via `tables: 'all'` that the user has not placed yet; never persisted until moved. */
+/** Positions of design tables and diagrams without a layout entry (root only); persisted once moved. */
 const autoPositions = ref(new Map<string, Position>());
 const laying = ref(false);
+const dropTarget = ref<string>();
 
-const saved = computed(() => new Map(props.canvas.nodes.map((n) => [makeNodeId(n.source, n.table), { x: n.x, y: n.y }])));
+const savedTables = computed(() => new Map(props.canvas.nodes.map((n) => [makeNodeId(n.source, n.table), { x: n.x, y: n.y }])));
 
+/** Position relative to the frame the item sits in. */
 function positionOf(id: string): Position | undefined {
-  return saved.value.get(id) ?? autoPositions.value.get(id);
+  const ref = itemOfFlowId(id);
+  switch (ref.kind) {
+    case 'table':
+      return savedTables.value.get(id) ?? autoPositions.value.get(id);
+    case 'diagram': {
+      const d = props.view.diagrams.find((x) => x.id === ref.id);
+      return d && !d.implicit ? { x: d.x, y: d.y } : autoPositions.value.get(id);
+    }
+    case 'note': {
+      const n = props.canvas.notes.find((x) => x.id === ref.id);
+      return n && { x: n.x, y: n.y };
+    }
+    case 'partition': {
+      const p = props.canvas.partitions.find((x) => x.id === ref.id);
+      return p && { x: p.x, y: p.y };
+    }
+  }
+}
+
+/** Level an on-screen item belongs to; `undefined` is the root canvas. */
+function levelOf(id: string): string | undefined {
+  const ref = itemOfFlowId(id);
+  switch (ref.kind) {
+    case 'table':
+      return props.view.tables.find((t) => t.id === id)?.partition;
+    case 'diagram':
+      return props.view.diagrams.find((d) => d.id === ref.id)?.partition;
+    case 'note':
+      return props.canvas.notes.find((n) => n.id === ref.id)?.partition;
+    case 'partition':
+      return props.canvas.partitions.find((p) => p.id === ref.id)?.parent;
+  }
+}
+
+function parentNodeOf(level: string | undefined): string | undefined {
+  return level === props.view.scope || level === undefined ? undefined : `part:${level}`;
 }
 
 const KIND_DASH: Record<RelationKind | 'mapping', string | undefined> = {
@@ -66,24 +111,41 @@ const MARK_COLOR: Record<Mark, string> = {
   accepted: 'var(--hn-muted)',
 };
 
+/** Items at the level being shown that already have a position, for placing implicit ones next to them. */
+function levelBoxes(): { x: number; y: number; w: number }[] {
+  const scope = props.view.scope;
+  const out: { x: number; y: number; w: number }[] = [];
+  for (const t of props.view.tables) {
+    const p = t.partition === scope ? positionOf(t.id) : undefined;
+    if (p) out.push({ ...p, w: NODE_WIDTH });
+  }
+  for (const d of props.view.diagrams) if (d.partition === scope && !d.implicit) out.push({ x: d.x, y: d.y, w: d.width });
+  for (const p of props.view.partitions) if (!p.parent) out.push({ x: p.x, y: p.y, w: p.width });
+  return out;
+}
+
 let placing = 0;
 watch(
   () => props.view,
   async (view) => {
-    const fresh = view.tables.filter((t) => !positionOf(t.id));
-    if (fresh.length) {
+    const freshTables = view.tables.filter((t) => t.implicit && !autoPositions.value.has(t.id));
+    const freshDiagrams = view.diagrams.filter((d) => d.implicit && !autoPositions.value.has(`diagram:${d.id}`));
+    if (freshTables.length || freshDiagrams.length) {
       const run = ++placing;
       laying.value = true;
-      const existing = new Map<string, Position>();
-      for (const t of view.tables) {
-        const p = positionOf(t.id);
-        if (p) existing.set(t.id, p);
-      }
-      const placed = await placeNewTables(fresh, view.edges, existing);
+      const boxes = levelBoxes();
+      const existing = new Map(boxes.map((b, i) => [String(i), { x: b.x, y: b.y }]));
+      const placed = freshTables.length ? await placeNewTables(freshTables, view.edges, existing) : new Map<string, Position>();
       laying.value = false;
       if (run !== placing) return;
       const next = new Map(autoPositions.value);
       for (const [id, p] of placed) next.set(id, p);
+      const right = Math.max(0, ...boxes.map((b) => b.x + b.w), ...[...placed.values()].map((p) => p.x + NODE_WIDTH));
+      let y = 0;
+      for (const d of freshDiagrams) {
+        next.set(`diagram:${d.id}`, { x: right + 80, y });
+        y += d.height + 40;
+      }
       autoPositions.value = next;
     }
     rebuild();
@@ -92,36 +154,46 @@ watch(
 );
 
 watch(
-  () => [props.canvas.notes, state.selection],
+  () => [state.selection, dropTarget.value],
   () => rebuild(),
 );
 
 function rebuild() {
   const sel = state.selection;
-  const zoneNodes: Node[] = props.view.zones.map((z) => ({
-    id: `zone:${z.id}`,
-    type: 'zone',
-    position: { x: z.x, y: z.y },
-    data: z,
-    zIndex: -1,
-    draggable: true,
-    selected: sel?.type === 'zone' && sel.id === z.id,
+  const partNodes: Node[] = props.view.partitions.map((p) => ({
+    id: `part:${p.id}`,
+    type: 'partition',
+    position: { x: p.x, y: p.y },
+    data: p,
+    parentNode: p.parent ? `part:${p.parent}` : undefined,
+    selected: sel?.type === 'partition' && sel.id === p.id,
+    dragHandle: '.header',
   }));
   const tableNodes: Node[] = props.view.tables.map((t) => ({
     id: t.id,
     type: 'table',
     position: positionOf(t.id) ?? { x: 0, y: 0 },
     data: t,
+    parentNode: parentNodeOf(t.partition),
     selected: (sel?.type === 'table' || sel?.type === 'column') && sel.nodeId === t.id,
   }));
-  const noteNodes: Node[] = props.canvas.notes.map((n) => ({
+  const diagramNodes: Node[] = props.view.diagrams.map((d) => ({
+    id: `diagram:${d.id}`,
+    type: 'diagram',
+    position: positionOf(`diagram:${d.id}`) ?? { x: 0, y: 0 },
+    data: d,
+    parentNode: parentNodeOf(d.partition),
+    selected: sel?.type === 'diagram' && sel.id === d.id,
+  }));
+  const noteNodes: Node[] = props.view.notes.map((n) => ({
     id: `note:${n.id}`,
     type: 'note',
     position: { x: n.x, y: n.y },
     data: n,
+    parentNode: parentNodeOf(n.partition),
     selected: sel?.type === 'note' && sel.id === n.id,
   }));
-  nodes.value = [...zoneNodes, ...tableNodes, ...noteNodes];
+  nodes.value = [...partNodes, ...tableNodes, ...diagramNodes, ...noteNodes];
   edges.value = props.view.edges.map((e) => toFlowEdge(e, sel?.type === 'relation' && e.edgeSource === sel.source && e.relationKey === sel.key));
 }
 
@@ -138,64 +210,161 @@ function toFlowEdge(e: EdgeView, selected: boolean): Edge {
     selectable: e.kind !== 'mapping',
     markerEnd: e.kind === 'mapping' ? undefined : { type: MarkerType.ArrowClosed, color },
     style: { stroke: color, strokeWidth: selected ? 2.5 : e.mark ? 2 : 1.2, strokeDasharray: KIND_DASH[e.kind] },
+    zIndex: 5,
   };
 }
 
-let initialViewportDone = false;
-onNodesInitialized(() => {
-  if (initialViewportDone) return;
-  initialViewportDone = true;
-  if (props.canvas.viewport) void setViewport(props.canvas.viewport);
+// ── Viewport per level ─────────────────────────────────────────────
+
+let viewportPending = true;
+function applyViewport() {
+  if (!viewportPending) return;
+  viewportPending = false;
+  const vp = viewports.get(scopeKey(props.view.scope));
+  if (vp) void setViewport(vp);
   else void fitView({ padding: 0.1 });
+}
+
+onNodesInitialized(() => applyViewport());
+
+watch(
+  () => state.scopeSeq,
+  async () => {
+    viewportPending = true;
+    rebuild();
+    await nextTick();
+    setTimeout(applyViewport, 80);
+  },
+);
+
+let viewportTimer: ReturnType<typeof setTimeout> | undefined;
+onMoveEnd(({ flowTransform }) => {
+  clearTimeout(viewportTimer);
+  const scope = scopeKey(props.view.scope);
+  const viewport = { x: flowTransform.x, y: flowTransform.y, zoom: flowTransform.zoom };
+  viewports.set(scope, viewport);
+  viewportTimer = setTimeout(() => post({ type: 'viewport', scope, viewport }), 400);
 });
 
-onNodeDragStop(({ nodes: moved }) => {
-  const zones = moved.filter((n) => n.type === 'zone');
-  const tables = moved.filter((n) => n.type === 'table');
-  const notes = moved.filter((n) => n.type === 'note');
-  const edit: CanvasEdit = [];
+// ── Dragging into and out of partition frames ─────────────────────
 
-  for (const z of zones) {
-    const zoneId = z.id.replace('zone:', '');
-    const original = props.canvas.zones.find((cz) => cz.id === zoneId);
-    if (!original) continue;
-    const dx = z.position.x - original.x;
-    const dy = z.position.y - original.y;
-    edit.push({ op: 'zone.put' as const, zone: { ...original, x: Math.round(z.position.x), y: Math.round(z.position.y) } });
-    if (dx || dy) {
-      const memberNodes = props.canvas.nodes.filter((n) => n.zone === zoneId);
-      const movedTableIds = new Set(tables.map((t) => t.id));
-      const toMove = memberNodes.filter((n) => !movedTableIds.has(makeNodeId(n.source, n.table)));
-      if (toMove.length) {
-        edit.push({
-          op: 'nodes.put' as const,
-          nodes: toMove.map((n) => ({ source: n.source, table: n.table, x: n.x + dx, y: n.y + dy })),
-        });
-      }
+function absRect(id: string): { x: number; y: number; w: number; h: number } | undefined {
+  const n = findNode(id);
+  if (!n) return undefined;
+  return { x: n.computedPosition.x, y: n.computedPosition.y, w: n.dimensions.width, h: n.dimensions.height };
+}
+
+/** Innermost expanded frame under a point, skipping `exclude`. */
+function frameAt(point: Position, exclude: Set<string> = new Set()): string | undefined {
+  let best: string | undefined;
+  let bestDepth = -1;
+  for (const p of props.view.partitions) {
+    if (p.collapsed || exclude.has(p.id)) continue;
+    const r = absRect(`part:${p.id}`);
+    if (!r || point.x < r.x || point.x > r.x + r.w || point.y < r.y || point.y > r.y + r.h) continue;
+    if (p.depth > bestDepth) {
+      best = p.id;
+      bestDepth = p.depth;
     }
   }
+  return best;
+}
 
-  if (tables.length) {
-    edit.push({
-      op: 'nodes.put' as const,
-      nodes: tables.map((n) => {
-        const { source, table } = parseNodeId(n.id);
-        return { source, table, x: n.position.x, y: n.position.y };
-      }),
-    });
-  }
-  for (const n of notes) {
-    edit.push({ op: 'note.put' as const, note: { ...(n.data as CanvasNote), x: Math.round(n.position.x), y: Math.round(n.position.y) } });
-  }
-  if (edit.length) editCanvas(zones.length ? '移动分区' : tables.length + notes.length > 1 ? '移动多个节点' : '移动节点', edit);
+/** Converts an absolute flow point to coordinates inside a level (the level shown uses absolute ones). */
+function relativeTo(level: string | undefined, point: Position): Position {
+  if (level === props.view.scope || !level) return point;
+  const r = absRect(`part:${level}`);
+  return r ? { x: point.x - r.x, y: point.y - r.y } : point;
+}
+
+function clampInFrame(level: string | undefined, p: Position): Position {
+  if (level === props.view.scope || !level) return { x: Math.round(p.x), y: Math.round(p.y) };
+  return { x: Math.round(Math.max(8, p.x)), y: Math.round(Math.max(PART_HEADER + 4, p.y)) };
+}
+
+function excludedFor(node: GraphNode): Set<string> {
+  const ref = itemOfFlowId(node.id);
+  return ref.kind === 'partition' ? partitionSubtree(props.canvas, ref.id) : new Set();
+}
+
+function centerOf(node: GraphNode): Position {
+  return { x: node.computedPosition.x + node.dimensions.width / 2, y: node.computedPosition.y + Math.min(node.dimensions.height / 2, 40) };
+}
+
+onNodeDrag(({ node }) => {
+  const target = frameAt(centerOf(node), excludedFor(node));
+  const next = target !== levelOf(node.id) ? target : undefined;
+  if (next !== dropTarget.value) dropTarget.value = next;
 });
+
+onNodeDragStop(async ({ nodes: moved }) => {
+  dropTarget.value = undefined;
+  const movedIds = new Set(moved.map((n) => n.id));
+  const edit: CanvasEdit = [];
+  const moves: MoveItem[] = [];
+  for (const n of moved) {
+    const graph = findNode(n.id) ?? n;
+    let ancestor = graph.parentNode;
+    let covered = false;
+    while (ancestor) {
+      if (movedIds.has(ancestor)) covered = true;
+      ancestor = findNode(ancestor)?.parentNode;
+    }
+    if (covered) continue;
+    const ref = itemOfFlowId(n.id);
+    const current = levelOf(n.id);
+    const target = frameAt(centerOf(graph), excludedFor(graph)) ?? props.view.scope;
+    if (target === current || (target === undefined && current === undefined)) {
+      const p = clampInFrame(current, graph.position);
+      switch (ref.kind) {
+        case 'table': {
+          const { source, table } = parseNodeId(ref.id);
+          edit.push({ op: 'nodes.put', nodes: [{ source, table, x: p.x, y: p.y }] });
+          break;
+        }
+        case 'diagram': {
+          const d = props.view.diagrams.find((x) => x.id === ref.id);
+          if (d) edit.push({ op: 'diagrams.put', diagrams: [{ id: d.id, x: p.x, y: p.y, width: d.width, height: d.height, partition: d.partition }] });
+          break;
+        }
+        case 'note': {
+          const note = props.canvas.notes.find((x) => x.id === ref.id);
+          if (note) edit.push({ op: 'note.put', note: { ...note, x: p.x, y: p.y } });
+          break;
+        }
+        case 'partition': {
+          const part = props.canvas.partitions.find((x) => x.id === ref.id);
+          if (part) edit.push({ op: 'partition.put', partition: { ...part, x: p.x, y: p.y } });
+          break;
+        }
+      }
+    } else {
+      const p = clampInFrame(target, relativeTo(target, graph.computedPosition));
+      moves.push({ ...ref, partition: target ?? null, x: p.x, y: p.y });
+    }
+  }
+  if (edit.length) editCanvas(edit.length > 1 ? '移动多个节点' : '移动节点', edit);
+  if (moves.length && !(await moveItems(moves))) rebuild();
+});
+
+// ── Clicks ─────────────────────────────────────────────────────────
 
 onConnect((connection) => emit('connect', connection));
 
 onNodeClick(({ node }) => {
-  if (node.type === 'table') state.selection = { type: 'table', nodeId: node.id };
-  else if (node.type === 'note') state.selection = { type: 'note', id: (node.data as CanvasNote).id };
-  else if (node.type === 'zone') state.selection = { type: 'zone', id: (node.data as ZoneView).id };
+  const ref = itemOfFlowId(node.id);
+  if (ref.kind === 'table') state.selection = { type: 'table', nodeId: node.id };
+  else state.selection = { type: ref.kind, id: ref.id };
+});
+
+onNodeDoubleClick(({ node, event }) => {
+  const ref = itemOfFlowId(node.id);
+  if (ref.kind === 'diagram') post({ type: 'diagram/open', diagram: ref.id });
+  else if (ref.kind === 'partition' && !props.view.partitions.find((p) => p.id === ref.id)?.collapsed) {
+    const e = event as MouseEvent;
+    const point = screenToFlowCoordinate({ x: e.clientX, y: e.clientY });
+    emit('create-table', ref.id, clampInFrame(ref.id, relativeTo(ref.id, point)));
+  } else if (ref.kind === 'partition') emit('enter', ref.id);
 });
 
 onEdgeClick(({ edge }) => {
@@ -208,16 +377,15 @@ onPaneClick(() => {
 });
 
 onNodeContextMenu(({ node, event }) => {
-  if (node.type !== 'table') return;
   const e = event as MouseEvent;
   e.preventDefault();
-  emit('node-menu', { nodeId: node.id, x: e.clientX, y: e.clientY });
+  emit('node-menu', { id: node.id, x: e.clientX, y: e.clientY, flow: screenToFlowCoordinate({ x: e.clientX, y: e.clientY }) });
 });
 
-let viewportTimer: ReturnType<typeof setTimeout> | undefined;
-onMoveEnd(({ flowTransform }) => {
-  clearTimeout(viewportTimer);
-  viewportTimer = setTimeout(() => post({ type: 'viewport', viewport: { x: flowTransform.x, y: flowTransform.y, zoom: flowTransform.zoom } }), 400);
+onPaneContextMenu((event) => {
+  const e = event as MouseEvent;
+  e.preventDefault();
+  emit('pane-menu', { x: e.clientX, y: e.clientY, flow: screenToFlowCoordinate({ x: e.clientX, y: e.clientY }) });
 });
 
 watch(
@@ -226,54 +394,69 @@ watch(
     const f = state.focus;
     if (!f) return;
     await nextTick();
-    if (nodes.value.some((n) => n.id === f.nodeId)) {
-      await fitView({ nodes: [f.nodeId], padding: 0.6, duration: 300, maxZoom: 1.2 });
-    }
+    setTimeout(() => {
+      if (nodes.value.some((n) => n.id === f.nodeId)) void fitView({ nodes: [f.nodeId], padding: 0.6, duration: 300, maxZoom: 1.2 });
+    }, 120);
   },
 );
 
 function onDoubleClick(event: MouseEvent) {
   if (!(event.target as HTMLElement).classList.contains('vue-flow__pane')) return;
-  emit('create-table', screenToFlowCoordinate({ x: event.clientX, y: event.clientY }));
+  emit('create-table', props.view.scope, screenToFlowCoordinate({ x: event.clientX, y: event.clientY }));
 }
 
+function togglePartition(id: string) {
+  const p = props.canvas.partitions.find((x) => x.id === id);
+  if (p) editCanvas(p.collapsed ? '展开分区画布' : '折叠分区画布', [{ op: 'partition.put', partition: { ...p, collapsed: !p.collapsed } }]);
+}
+
+function resizeDiagram({ id, width, height }: { id: string; width: number; height: number }) {
+  const d = props.view.diagrams.find((x) => x.id === id);
+  const p = positionOf(`diagram:${id}`) ?? { x: 0, y: 0 };
+  if (d) editCanvas('调整设计图大小', [{ op: 'diagrams.put', diagrams: [{ id, x: p.x, y: p.y, width, height, partition: d.partition }] }]);
+}
+
+// ── Auto layout ────────────────────────────────────────────────────
+
 async function autoLayout(onlySelected: boolean) {
-  const selected = new Set(getSelectedNodes.value.map((n) => n.id));
-  const targets = props.view.tables.filter((t) => !onlySelected || selected.has(t.id));
-  if (!targets.length) return;
-  laying.value = true;
-
-  const hasZones = props.canvas.zones.length > 0 && !onlySelected;
   const edit: CanvasEdit = [];
-
-  if (hasZones) {
-    const result = await layoutWithZones(targets, props.view.edges, props.canvas.nodes, props.canvas.zones);
+  if (!onlySelected) {
+    laying.value = true;
+    const positions = await layoutLevel(props.view);
     laying.value = false;
-    edit.push({
-      op: 'nodes.put',
-      nodes: [...result.tables].map(([id, p]) => ({ source: parseNodeId(id).source, table: parseNodeId(id).table, x: p.x, y: p.y })),
-    });
-    for (const [zid, rect] of result.zones) {
-      const original = props.canvas.zones.find((z) => z.id === zid);
-      if (original) edit.push({ op: 'zone.put', zone: { ...original, ...rect } });
+    const tables = [];
+    for (const [id, p] of positions) {
+      const ref = itemOfFlowId(id);
+      if (ref.kind === 'table') tables.push({ ...parseNodeId(id), x: p.x, y: p.y });
+      else if (ref.kind === 'diagram') {
+        const d = props.view.diagrams.find((x) => x.id === ref.id);
+        if (d) edit.push({ op: 'diagrams.put', diagrams: [{ id: d.id, x: p.x, y: p.y, width: d.width, height: d.height, partition: d.partition }] });
+      } else if (ref.kind === 'note') {
+        const n = props.canvas.notes.find((x) => x.id === ref.id);
+        if (n) edit.push({ op: 'note.put', note: { ...n, x: p.x, y: p.y } });
+      } else {
+        const part = props.canvas.partitions.find((x) => x.id === ref.id);
+        if (part) edit.push({ op: 'partition.put', partition: { ...part, x: p.x, y: p.y } });
+      }
     }
-  } else {
-    const positions = await layoutTables(targets, props.view.edges);
-    laying.value = false;
-    if (onlySelected) {
-      const before = targets.map((t) => positionOf(t.id) ?? { x: 0, y: 0 });
-      const ox = Math.min(...before.map((p) => p.x));
-      const oy = Math.min(...before.map((p) => p.y));
-      for (const [id, p] of positions) positions.set(id, { x: p.x + ox, y: p.y + oy });
-    }
-    edit.push({
-      op: 'nodes.put',
-      nodes: [...positions].map(([id, p]) => ({ source: parseNodeId(id).source, table: parseNodeId(id).table, x: p.x, y: p.y })),
-    });
+    if (tables.length) edit.unshift({ op: 'nodes.put', nodes: tables });
+    editCanvas('自动布局', edit);
+    await nextTick();
+    setTimeout(() => void fitView({ padding: 0.1, duration: 300 }), 80);
+    return;
   }
-
-  editCanvas('自动布局', edit);
-  if (!onlySelected) await nextTick().then(() => fitView({ padding: 0.1, duration: 300 }));
+  const selected = new Set(getSelectedNodes.value.map((n) => n.id));
+  const picked = props.view.tables.filter((t) => selected.has(t.id));
+  if (!picked.length) return;
+  const level = picked[0].partition;
+  const targets = picked.filter((t) => t.partition === level);
+  laying.value = true;
+  const positions = await layoutTables(targets, props.view.edges);
+  laying.value = false;
+  const before = targets.map((t) => positionOf(t.id) ?? { x: 0, y: 0 });
+  const ox = Math.min(...before.map((p) => p.x));
+  const oy = Math.min(...before.map((p) => p.y));
+  editCanvas('布局选中', [{ op: 'nodes.put', nodes: [...positions].map(([id, p]) => ({ ...parseNodeId(id), x: p.x + ox, y: p.y + oy })) }]);
 }
 
 function centerPosition(): Position {
@@ -290,19 +473,16 @@ function selectedNodeIds(): string[] {
   return getSelectedNodes.value.map((n) => n.id);
 }
 
-function onZoneResize({ id, width, height, dx, dy }: { id: string; width: number; height: number; dx: number; dy: number }) {
-  const original = props.canvas.zones.find((z) => z.id === id);
-  if (!original) return;
-  editCanvas('调整分区大小', [
-    { op: 'zone.put', zone: { ...original, x: original.x + dx, y: original.y + dy, width, height } },
-  ]);
-}
-
-function onRenameZone(id: string) {
-  emit('rename-zone', id);
-}
-
-defineExpose({ autoLayout, centerPosition, currentPosition, selectedNodeIds, fitView: () => fitView({ padding: 0.1, duration: 300 }) });
+defineExpose({
+  autoLayout,
+  centerPosition,
+  currentPosition,
+  selectedNodeIds,
+  frameAt,
+  relativeTo,
+  toFlow: (screen: Position) => screenToFlowCoordinate(screen),
+  fitView: () => fitView({ padding: 0.1, duration: 300 }),
+});
 </script>
 
 <template>
@@ -319,16 +499,14 @@ defineExpose({ autoLayout, centerPosition, currentPosition, selectedNodeIds, fit
       :elevate-edges-on-select="true"
       :only-render-visible-elements="view.tables.length > 100"
     >
-      <template #node-zone="nodeProps">
-        <ZoneNode
-          :data="nodeProps.data"
-          :selected="nodeProps.selected"
-          @resize="onZoneResize"
-          @rename-zone="onRenameZone"
-        />
+      <template #node-partition="nodeProps">
+        <PartitionNode :data="nodeProps.data" :selected="nodeProps.selected" :drop-target="dropTarget === nodeProps.data.id" @enter="emit('enter', $event)" @toggle="togglePartition" />
       </template>
       <template #node-table="nodeProps">
         <TableNode :data="nodeProps.data" :selected="nodeProps.selected" />
+      </template>
+      <template #node-diagram="nodeProps">
+        <DiagramNode :data="nodeProps.data" :selected="nodeProps.selected" @resize="resizeDiagram" @pending="emit('pending', $event)" />
       </template>
       <template #node-note="nodeProps">
         <NoteNode :data="nodeProps.data" :selected="nodeProps.selected" />

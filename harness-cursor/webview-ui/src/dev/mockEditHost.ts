@@ -1,5 +1,5 @@
 /**
- * Stand-in for the extension host of the edit page in a normal browser (`?view=edit&kind=design|workspace|canvas`).
+ * Stand-in for the extension host of the edit page in a normal browser (`?view=edit&kind=design|workspace|partition`).
  */
 import type { EditHostMessage, EditKind, EditWebviewMessage } from '@shared/editProtocol';
 import { DESIGN_DRIVERS } from '@shared/workspace';
@@ -12,8 +12,8 @@ function handle(msg: EditWebviewMessage) {
   switch (msg.type) {
     case 'ready': {
       const param = new URLSearchParams(location.search).get('kind');
-      const kind: EditKind = param === 'workspace' || param === 'canvas' ? param : 'design';
-      const names: Record<EditKind, string> = { workspace: '演示工作区', design: '设计库 1', canvas: '画布 1' };
+      const kind: EditKind = param === 'workspace' || param === 'partition' ? param : 'design';
+      const names: Record<EditKind, string> = { workspace: '演示工作区', design: '设计画布 1', partition: '分区画布 1' };
       send({
         type: 'init',
         kind,

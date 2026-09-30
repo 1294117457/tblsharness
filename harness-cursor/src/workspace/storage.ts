@@ -1,7 +1,7 @@
 import { promises as nodeFs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import type { CanvasFile } from '../shared/canvas';
+import { emptyCanvas, parseCanvas, serializeCanvas, type CanvasFile } from '../shared/canvas';
 import { CONNECTION_DRIVERS } from '../shared/connection';
 import type { DesignExt } from '../shared/model';
 import type { TblsSchema } from '../shared/tbls';
@@ -34,9 +34,8 @@ import {
   writeYaml,
 } from './fsUtil';
 
-export const CANVAS_SUFFIX = '.json';
+export const LAYOUT_FILE = 'layout.json';
 export const DIAGRAM_SUFFIX = '.md';
-const CANVAS_ID = /^canvas\d+$/;
 const DIAGRAM_ID = /^diagram\d+$/;
 
 /**
@@ -44,7 +43,7 @@ const DIAGRAM_ID = /^diagram\d+$/;
  *
  * <root>/workspaces/<ws>/
  *   workspace.yml
- *   design/<id>/{design.yml, schema.json, ext.json, comparisons.json, diagrams/<diagramN>.md, canvases/<canvasN>.json}
+ *   design/<id>/{design.yml, schema.json, ext.json, comparisons.json, layout.json, diagrams/<diagramN>.md}
  *   db/<id>/{source.yml, .tbls.yml?, snapshots/*.json}
  */
 export class HarnessStorage {
@@ -112,9 +111,8 @@ export class HarnessStorage {
       const diagram = file?.endsWith(DIAGRAM_SUFFIX) ? file.slice(0, -DIAGRAM_SUFFIX.length) : undefined;
       return { workspace, kind: 'diagram', id, diagram: diagram && DIAGRAM_ID.test(diagram) ? diagram : undefined };
     }
-    if (area === 'design' && id && sub === 'canvases') {
-      const canvas = file?.endsWith(CANVAS_SUFFIX) ? file.slice(0, -CANVAS_SUFFIX.length) : undefined;
-      return { workspace, kind: 'canvas', id, design: id, canvas: canvas && CANVAS_ID.test(canvas) ? canvas : undefined };
+    if (area === 'design' && id && sub === LAYOUT_FILE && !file) {
+      return { workspace, kind: 'canvas', id, design: id };
     }
     if (area === 'design' && id && sub === 'comparisons.json') {
       return { workspace, kind: 'comparisons', id };
@@ -129,8 +127,8 @@ export class HarnessStorage {
 export type Located =
   | { workspace: string; kind?: undefined; id?: undefined }
   | { workspace: string; kind: SourceKind; id: string }
-  /** Canvas inside a design: `design/<designN>/canvases/<canvasN>.json`. */
-  | { workspace: string; kind: 'canvas'; id: string; design: string; canvas?: string }
+  /** `design/<designN>/layout.json`; `id` and `design` are both the design ID. */
+  | { workspace: string; kind: 'canvas'; id: string; design: string }
   /** `id` is the design ID; `diagram` is missing for the directory itself or unrelated files in it. */
   | { workspace: string; kind: 'diagram'; id: string; diagram?: string }
   | { workspace: string; kind: 'comparisons'; id: string };
@@ -248,30 +246,19 @@ export class Design {
       meta.sources = raw.sources.map(String);
     }
     const diagram = Number(raw.seq?.diagram);
-    const canvas = Number(raw.seq?.canvas);
-    if (diagram > 0 || canvas > 0) {
-      meta.seq = {};
-      if (diagram > 0) meta.seq.diagram = diagram;
-      if (canvas > 0) meta.seq.canvas = canvas;
-    }
-    if (raw.lastCanvas) meta.lastCanvas = String(raw.lastCanvas);
+    if (diagram > 0) meta.seq = { diagram };
     return meta;
   }
 
-  /** Keeps the diagram/canvas counters when they moved on disk since `meta` was read. */
+  /** Keeps the diagram counter when it moved on disk since `meta` was read. */
   async writeMeta(meta: DesignMeta): Promise<void> {
     const current = (await exists(this.metaFile)) ? await this.readMeta() : undefined;
     const diagram = Math.max(current?.seq?.diagram ?? 0, meta.seq?.diagram ?? 0);
-    const canvas = Math.max(current?.seq?.canvas ?? 0, meta.seq?.canvas ?? 0);
     const out: DesignMeta = { version: 1, name: meta.name };
     if (meta.description) out.description = meta.description;
     if (meta.createdFrom) out.createdFrom = meta.createdFrom;
     if (meta.sources && meta.sources.length > 0) out.sources = meta.sources;
-    const seq: NonNullable<DesignMeta['seq']> = {};
-    if (canvas > 0) seq.canvas = canvas;
-    if (diagram > 0) seq.diagram = diagram;
-    if (Object.keys(seq).length > 0) out.seq = seq;
-    if (meta.lastCanvas) out.lastCanvas = meta.lastCanvas;
+    if (diagram > 0) out.seq = { diagram };
     await writeYaml(this.metaFile, out);
   }
 
@@ -307,36 +294,24 @@ export class Design {
     await vscode.workspace.fs.delete(this.diagramUri(id), { useTrash: false });
   }
 
-  // ── Canvases ──────────────────────────────────────────────────────
+  // ── Layout ────────────────────────────────────────────────────────
 
-  get canvasesDir(): vscode.Uri {
-    return vscode.Uri.joinPath(this.dir, 'canvases');
+  /** Opening this file with the canvas editor shows the whole design, partitions included. */
+  get layoutUri(): vscode.Uri {
+    return vscode.Uri.joinPath(this.dir, LAYOUT_FILE);
   }
 
-  canvasUri(id: string): vscode.Uri {
-    return vscode.Uri.joinPath(this.canvasesDir, `${id}${CANVAS_SUFFIX}`);
+  async readLayout(): Promise<CanvasFile> {
+    return parseCanvas((await readTextIfExists(this.layoutUri)) ?? '');
   }
 
-  async canvasIds(): Promise<string[]> {
-    const ids = (await listFiles(this.canvasesDir, CANVAS_SUFFIX)).map((f) => f.slice(0, -CANVAS_SUFFIX.length));
-    return ids.filter((id) => CANVAS_ID.test(id)).sort((a, b) => Number(a.slice(6)) - Number(b.slice(6)));
-  }
-
-  async readCanvas(id: string): Promise<CanvasFile> {
-    return readJson<CanvasFile>(this.canvasUri(id));
-  }
-
-  async createCanvas(text: string): Promise<string> {
-    await mkdirp(this.canvasesDir);
-    const meta = await this.readMeta();
-    const { id, n } = await claim(ID_PREFIX.canvas, await this.canvasIds(), meta.seq?.canvas, (c) => tryWriteNew(this.canvasUri(c), text));
-    const latest = await this.readMeta();
-    await this.writeMeta({ ...latest, seq: { ...latest.seq, canvas: Math.max(n, latest.seq?.canvas ?? 0) } });
-    return id;
-  }
-
-  async removeCanvas(id: string): Promise<void> {
-    await vscode.workspace.fs.delete(this.canvasUri(id), { useTrash: false });
+  /** Creates an empty layout when missing, so the custom editor always has a file to open. */
+  async ensureLayout(): Promise<vscode.Uri> {
+    if (!(await exists(this.layoutUri))) {
+      await mkdirp(this.dir);
+      await tryWriteNew(this.layoutUri, serializeCanvas(emptyCanvas()));
+    }
+    return this.layoutUri;
   }
 
   // ── Comparisons ───────────────────────────────────────────────────
@@ -394,6 +369,7 @@ export class Design {
     await mkdirp(this.dir);
     await this.writeMeta(meta);
     await this.writeDoc(doc);
+    await this.ensureLayout();
   }
 
   remove(): Promise<void> {

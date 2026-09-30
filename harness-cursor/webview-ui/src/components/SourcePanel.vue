@@ -1,41 +1,44 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { DESIGN_SOURCE, nodeId } from '@shared/canvas';
+import { DESIGN_SOURCE, nodeId, type ItemRef } from '@shared/canvas';
+import { diagramTypeLabel } from '@shared/diagram';
 import type { CanvasView } from '../canvas/viewModel';
-import { canvas, editCanvas, focusNode, state } from '../store';
+import { editCanvas, focusNode, state } from '../store';
 import { post, request } from '../vscode';
 
 const props = defineProps<{ view: CanvasView }>();
 const emit = defineEmits<{
-  'add-tables': [source: string, tables: string[]];
-  'remove-nodes': [ids: string[]];
-  'pick-mode': [];
+  'add-db-tables': [source: string, tables: string[]];
+  'remove-db-tables': [source: string, tables: string[]];
+  'create-table': [];
+  'create-diagram': [];
+  collapse: [];
 }>();
 
 const search = ref('');
 const adding = ref(false);
 const collapsed = ref(new Set<string>());
-const shown = computed(() => new Set(props.view.tables.map((t) => t.id)));
 
-const designSchema = computed(() => state.sources[DESIGN_SOURCE]?.schema);
-const designTables = computed(() => {
+function matches(...texts: (string | undefined)[]): boolean {
   const q = search.value.trim().toLowerCase();
-  return (designSchema.value?.tables ?? [])
-    .filter((t) => !q || t.key.toLowerCase().includes(q) || t.comment?.toLowerCase().includes(q))
-    .map((t) => ({ key: t.key, comment: t.comment, id: nodeId(DESIGN_SOURCE, t.key) }));
-});
+  return !q || texts.some((t) => t?.toLowerCase().includes(q));
+}
 
-const dbSources = computed(() => {
-  const q = search.value.trim().toLowerCase();
-  return Object.entries(state.sources)
+const designTables = computed(() => props.view.level.tables.filter((t) => matches(t.key, t.displayName, t.comment)));
+const diagrams = computed(() => props.view.level.diagrams.filter((d) => matches(d.name)));
+const hasDesign = computed(() => !!state.sources[DESIGN_SOURCE]?.schema);
+
+const dbSources = computed(() =>
+  Object.entries(state.sources)
     .filter(([k]) => k !== DESIGN_SOURCE)
     .map(([sourceId, data]) => {
-      const tables = (data.schema?.tables ?? [])
-        .filter((t) => !q || t.key.toLowerCase().includes(q) || t.comment?.toLowerCase().includes(q))
-        .map((t) => ({ key: t.key, comment: t.comment, id: nodeId(sourceId, t.key) }));
-      return { sourceId, data, tables };
-    });
-});
+      const here = props.view.level.db[sourceId] ?? new Set<string>();
+      const elsewhere = props.view.level.dbElsewhere[sourceId] ?? new Set<string>();
+      const all = data.schema?.tables ?? [];
+      const tables = all.filter((t) => matches(t.key, t.comment)).map((t) => ({ key: t.key, comment: t.comment, shown: here.has(t.key), elsewhere: !here.has(t.key) && elsewhere.has(t.key) }));
+      return { sourceId, data, tables, allShown: !!all.length && all.every((t) => here.has(t.key)), someShown: here.size > 0 };
+    }),
+);
 
 const availableDbs = computed(() => {
   const cat = state.catalog;
@@ -44,23 +47,80 @@ const availableDbs = computed(() => {
   return cat.db.filter((d) => !onCanvas.has(d.id));
 });
 
+const allTablesShown = computed(() => props.view.level.tables.length > 0 && props.view.level.tables.every((t) => !t.hidden));
+const someTablesShown = computed(() => props.view.level.tables.some((t) => !t.hidden));
+const allDiagramsShown = computed(() => props.view.level.diagrams.length > 0 && props.view.level.diagrams.every((d) => !d.hidden));
+const someDiagramsShown = computed(() => props.view.level.diagrams.some((d) => !d.hidden));
+
 async function addDb(dbId: string) {
   adding.value = false;
-  try { await request({ type: 'source/add', dbId }); } catch { /* handled by host */ }
+  try {
+    await request({ type: 'source/add', dbId });
+  } catch {
+    /* reported by the host */
+  }
 }
 
 async function removeDb(dbId: string) {
-  try { await request({ type: 'source/remove', dbId }); } catch { /* handled by host */ }
+  try {
+    await request({ type: 'source/remove', dbId });
+  } catch {
+    /* reported by the host */
+  }
 }
 
-function setDesignShowAll(all: boolean) {
-  if (all) editCanvas('显示全部表', [{ op: 'designTables.set', mode: 'all' }]);
-  else emit('pick-mode');
+function setHidden(items: ItemRef[], hidden: boolean, label: string) {
+  if (items.length) editCanvas(label, [{ op: 'hidden.set', items, hidden }]);
 }
 
-function toggle(source: string, key: string, on: boolean) {
-  if (on) emit('add-tables', source, [key]);
-  else emit('remove-nodes', [nodeId(source, key)]);
+function toggleTable(key: string, on: boolean) {
+  setHidden([{ kind: 'table', id: nodeId(DESIGN_SOURCE, key) }], !on, on ? `显示表 ${key}` : `隐藏表 ${key}`);
+}
+
+function toggleAllTables(on: boolean) {
+  setHidden(
+    props.view.level.tables.map((t) => ({ kind: 'table', id: nodeId(DESIGN_SOURCE, t.key) })),
+    !on,
+    on ? '显示本层全部设计表' : '隐藏本层全部设计表',
+  );
+}
+
+function openTable(key: string, hidden: boolean) {
+  const id = nodeId(DESIGN_SOURCE, key);
+  if (hidden) toggleTable(key, true);
+  focusNode(id);
+}
+
+function toggleDiagram(id: string, on: boolean) {
+  setHidden([{ kind: 'diagram', id }], !on, on ? '显示设计图' : '隐藏设计图');
+}
+
+function toggleAllDiagrams(on: boolean) {
+  setHidden(
+    props.view.level.diagrams.map((d) => ({ kind: 'diagram', id: d.id })),
+    !on,
+    on ? '显示本层全部设计图' : '隐藏本层全部设计图',
+  );
+}
+
+function openDiagramCard(id: string, hidden: boolean) {
+  if (hidden) toggleDiagram(id, true);
+  focusNode(`diagram:${id}`);
+}
+
+function toggleDb(source: string, key: string, on: boolean) {
+  if (on) emit('add-db-tables', source, [key]);
+  else emit('remove-db-tables', source, [key]);
+}
+
+function toggleAllDb(source: string, on: boolean) {
+  const g = dbSources.value.find((x) => x.sourceId === source);
+  if (!g) return;
+  const all = g.data.schema?.tables ?? [];
+  const here = props.view.level.db[source] ?? new Set<string>();
+  const elsewhere = props.view.level.dbElsewhere[source] ?? new Set<string>();
+  if (on) emit('add-db-tables', source, all.map((t) => t.key).filter((k) => !here.has(k) && !elsewhere.has(k)));
+  else emit('remove-db-tables', source, [...here]);
 }
 
 function toggleCollapsed(id: string) {
@@ -69,61 +129,119 @@ function toggleCollapsed(id: string) {
   else next.add(id);
   collapsed.value = next;
 }
+
+function indeterminate(some: boolean, all: boolean) {
+  return some && !all;
+}
 </script>
 
 <template>
   <div class="source-panel">
     <div class="panel-header">
       <span>数据源</span>
-      <button class="secondary small" @click="adding = !adding">+ 添加数据库</button>
+      <span class="header-actions">
+        <button class="secondary small" @click="adding = !adding">+ 添加数据库</button>
+        <button class="icon-btn" title="收起数据源面板" @click="emit('collapse')">«</button>
+      </span>
     </div>
     <div v-if="adding" class="add-menu">
-      <p v-if="!availableDbs.length" class="muted">工作区里的数据库都已经在画布上了。</p>
+      <p v-if="!availableDbs.length" class="muted">工作区里的数据库都已经添加过了。</p>
       <button v-for="d in availableDbs" :key="d.id" class="menu-item" @click="addDb(d.id)">
         <span>🗄️ {{ d.name }}</span>
         <span class="muted">{{ d.hasSnapshot ? `${d.tableCount} 张表` : '还没有快照' }}</span>
       </button>
     </div>
-    <input v-model="search" class="search" placeholder="搜索表名或注释" @keydown.stop />
+    <input v-model="search" class="search" placeholder="搜索表名、图名或注释" @keydown.stop />
 
     <div class="groups">
-      <!-- Design section -->
-      <section v-if="designSchema">
+      <section v-if="hasDesign">
         <div class="source-row">
-          <button class="twisty" @click="toggleCollapsed(DESIGN_SOURCE)">{{ collapsed.has(DESIGN_SOURCE) ? '▸' : '▾' }}</button>
-          <span class="source-name" :title="state.design?.name ?? '设计'">✏️ {{ state.design?.name ?? '设计' }}</span>
+          <button class="twisty" @click="toggleCollapsed('tables')">{{ collapsed.has('tables') ? '▸' : '▾' }}</button>
+          <span class="source-name">设计表<span class="count">（本层 {{ view.level.tables.length }}）</span></span>
+          <button class="icon-btn" title="在本层新建表" @click="emit('create-table')">＋</button>
         </div>
-        <template v-if="!collapsed.has(DESIGN_SOURCE)">
-          <label class="show-all">
-            <input type="checkbox" :checked="canvas.designTables === 'all'" @change="setDesignShowAll(($event.target as HTMLInputElement).checked)" />
-            显示全部表（包括以后新增的）
+        <template v-if="!collapsed.has('tables')">
+          <label v-if="view.level.tables.length" class="show-all">
+            <input
+              type="checkbox"
+              :checked="allTablesShown"
+              :indeterminate="indeterminate(someTablesShown, allTablesShown)"
+              @change="toggleAllTables(($event.target as HTMLInputElement).checked)"
+            />
+            全部显示
           </label>
+          <p v-else class="muted hint">这一层还没有设计表。</p>
           <ul>
-            <li v-for="t in designTables" :key="t.id">
-              <input type="checkbox" :checked="shown.has(t.id)" :disabled="canvas.designTables === 'all'" @change="toggle(DESIGN_SOURCE, t.key, ($event.target as HTMLInputElement).checked)" />
-              <a href="#" :class="{ off: !shown.has(t.id) }" :title="t.comment" @click.prevent="shown.has(t.id) ? focusNode(t.id) : toggle(DESIGN_SOURCE, t.key, true)">{{ t.key }}</a>
+            <li v-for="t in designTables" :key="t.key">
+              <input type="checkbox" :checked="!t.hidden" @change="toggleTable(t.key, ($event.target as HTMLInputElement).checked)" />
+              <a href="#" :class="{ off: t.hidden }" :title="[t.namespaceTag ? `真实表名：${t.key}` : '', t.comment ?? ''].filter(Boolean).join('\n') || undefined" @click.prevent="openTable(t.key, t.hidden)">
+                <span v-if="t.namespaceTag" class="ns">{{ t.namespaceTag }}</span>{{ t.displayName }}
+              </a>
             </li>
           </ul>
         </template>
       </section>
 
-      <!-- DB sections -->
+      <section v-if="hasDesign">
+        <div class="source-row">
+          <button class="twisty" @click="toggleCollapsed('diagrams')">{{ collapsed.has('diagrams') ? '▸' : '▾' }}</button>
+          <span class="source-name">设计图<span class="count">（本层 {{ view.level.diagrams.length }}）</span></span>
+          <button class="icon-btn" title="在本层新建设计图" @click="emit('create-diagram')">＋</button>
+        </div>
+        <template v-if="!collapsed.has('diagrams')">
+          <label v-if="view.level.diagrams.length" class="show-all">
+            <input
+              type="checkbox"
+              :checked="allDiagramsShown"
+              :indeterminate="indeterminate(someDiagramsShown, allDiagramsShown)"
+              @change="toggleAllDiagrams(($event.target as HTMLInputElement).checked)"
+            />
+            全部显示
+          </label>
+          <p v-else class="muted hint">这一层还没有设计图。</p>
+          <ul>
+            <li v-for="d in diagrams" :key="d.id">
+              <input type="checkbox" :checked="!d.hidden" @change="toggleDiagram(d.id, ($event.target as HTMLInputElement).checked)" />
+              <a href="#" :class="{ off: d.hidden }" @click.prevent="openDiagramCard(d.id, d.hidden)" @dblclick.prevent="post({ type: 'diagram/open', diagram: d.id })">
+                {{ d.name }}<span class="muted type">（{{ diagramTypeLabel(d.type) }}）</span>
+              </a>
+            </li>
+          </ul>
+        </template>
+      </section>
+
       <section v-for="g in dbSources" :key="g.sourceId">
         <div class="source-row">
           <button class="twisty" @click="toggleCollapsed(g.sourceId)">{{ collapsed.has(g.sourceId) ? '▸' : '▾' }}</button>
           <span class="source-name" :title="g.data.name">🗄️ {{ g.data.name }}</span>
           <span class="actions">
             <button class="icon-btn" title="同步数据库结构" @click="post({ type: 'db/sync', source: g.sourceId })">⟳</button>
-            <button class="icon-btn" title="从画布移除这个数据库" @click="removeDb(g.sourceId)">✕</button>
+            <button class="icon-btn" title="从这个设计画布移除这个数据库" @click="removeDb(g.sourceId)">✕</button>
           </span>
         </div>
         <template v-if="!collapsed.has(g.sourceId)">
           <p v-if="g.data.error" class="error">{{ g.data.error }}</p>
           <p v-else-if="!g.data.schema" class="muted hint">还没有快照，请先同步或导入快照。</p>
+          <label v-else-if="g.data.schema.tables.length" class="show-all" title="放在其他层的表保持不动">
+            <input
+              type="checkbox"
+              :checked="g.allShown"
+              :indeterminate="indeterminate(g.someShown, g.allShown)"
+              @change="toggleAllDb(g.sourceId, ($event.target as HTMLInputElement).checked)"
+            />
+            显示全部表
+          </label>
           <ul>
-            <li v-for="t in g.tables" :key="t.id">
-              <input type="checkbox" :checked="shown.has(t.id)" @change="toggle(g.sourceId, t.key, ($event.target as HTMLInputElement).checked)" />
-              <a href="#" :class="{ off: !shown.has(t.id) }" :title="t.comment" @click.prevent="shown.has(t.id) ? focusNode(t.id) : toggle(g.sourceId, t.key, true)">{{ t.key }}</a>
+            <li v-for="t in g.tables" :key="t.key">
+              <input type="checkbox" :checked="t.shown" @change="toggleDb(g.sourceId, t.key, ($event.target as HTMLInputElement).checked)" />
+              <a
+                href="#"
+                :class="{ off: !t.shown }"
+                :title="[t.elsewhere ? '已放在其他层，勾选会移到这一层' : '', t.comment ?? ''].filter(Boolean).join('\n') || undefined"
+                @click.prevent="t.shown ? focusNode(nodeId(g.sourceId, t.key)) : toggleDb(g.sourceId, t.key, true)"
+              >
+                {{ t.key }}<span v-if="t.elsewhere" class="muted type">（其他层）</span>
+              </a>
             </li>
           </ul>
         </template>
@@ -144,8 +262,14 @@ function toggleCollapsed(id: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
+  padding: 6px 6px 6px 10px;
   font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .add-menu {
@@ -168,11 +292,6 @@ function toggleCollapsed(id: string) {
 
 .menu-item:hover {
   background: var(--hn-node-header);
-}
-
-.menu-sep {
-  margin: 4px 0;
-  border-top: 1px solid var(--hn-border);
 }
 
 .search {
@@ -207,9 +326,10 @@ function toggleCollapsed(id: string) {
   font-weight: 600;
 }
 
-.rename-input {
-  flex: 1;
-  min-width: 0;
+.count,
+.type {
+  font-weight: 400;
+  color: var(--hn-muted);
 }
 
 .actions {
@@ -255,7 +375,18 @@ li a:hover {
   text-decoration: underline;
 }
 
+.ns {
+  margin-right: 2px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--hn-muted) 20%, transparent);
+  color: var(--hn-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+}
+
 .hint {
+  margin: 0;
   padding: 4px 8px;
 }
 

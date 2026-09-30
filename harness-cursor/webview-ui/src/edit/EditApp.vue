@@ -3,7 +3,7 @@ import { computed, reactive, ref } from 'vue';
 import type { EditInit, EditKind } from '@shared/editProtocol';
 import { onInit, save, send } from './host';
 
-const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计库', canvas: '画布' };
+const KIND_LABEL: Record<EditKind, string> = { workspace: '工作区', design: '设计画布', partition: '分区画布' };
 
 const init = ref<EditInit>();
 const form = reactive({ name: '', description: '', driver: '' });

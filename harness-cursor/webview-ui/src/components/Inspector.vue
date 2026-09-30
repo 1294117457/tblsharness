@@ -5,7 +5,11 @@ import type { ColumnPatch, RelationPatch } from '@shared/designOps';
 import type { NColumn, NRelation, NTable, RelationKind } from '@shared/model';
 import { COLUMN_TEMPLATES, columnTemplate, parseQuickColumns, quickColumnOps, type ColumnTemplate, type QuickColumn } from '@shared/quickColumns';
 import type { TblsCardinality } from '@shared/tbls';
-import { canvas, designOp, editCanvas, focusNode, state, toast } from '../store';
+import { diagramTypeLabel } from '@shared/diagram';
+import { effectiveNamespace, namespaceLabel } from '@shared/namespace';
+import type { CanvasView } from '../canvas/viewModel';
+import { canvas, deleteDiagram, deletePartition, designOp, editCanvas, focusNode, setScope, state, toast } from '../store';
+import { post } from '../vscode';
 
 const RELATION_KINDS: { value: RelationKind; label: string }[] = [
   { value: 'fk', label: '外键（数据库约束）' },
@@ -50,9 +54,11 @@ interface Target {
   relation?: NRelation;
 }
 
+const props = defineProps<{ view: CanvasView }>();
+
 const target = computed<Target | undefined>(() => {
   const sel = state.selection;
-  if (!sel || sel.type === 'note') return undefined;
+  if (!sel || sel.type === 'note' || sel.type === 'diagram' || sel.type === 'partition') return undefined;
   const source = sel.type === 'relation' ? sel.source : parseNodeId(sel.nodeId).source;
   const srcData = state.sources[source];
   if (!srcData) return undefined;
@@ -71,6 +77,40 @@ const note = computed(() => {
   const sel = state.selection;
   return sel?.type === 'note' ? canvas.value.notes.find((n) => n.id === sel.id) : undefined;
 });
+
+const partition = computed(() => {
+  const sel = state.selection;
+  return sel?.type === 'partition' ? canvas.value.partitions.find((p) => p.id === sel.id) : undefined;
+});
+
+const partitionView = computed(() => (partition.value ? props.view.partitions.find((p) => p.id === partition.value!.id) : undefined));
+
+const partitionNamespace = computed(() => {
+  const p = partition.value;
+  if (!p) return undefined;
+  const ns = p.namespace ?? effectiveNamespace(canvas.value, p.id);
+  return ns && { label: namespaceLabel(ns), kind: ns.kind === 'schema' ? '数据库 schema' : '表名前缀', inherited: !p.namespace };
+});
+
+const diagram = computed(() => {
+  const sel = state.selection;
+  return sel?.type === 'diagram' ? state.diagrams.find((d) => d.id === sel.id) : undefined;
+});
+
+function updatePartition(patch: { name?: string; description?: string }) {
+  const p = partition.value;
+  if (!p) return;
+  const name = patch.name?.trim();
+  if (patch.name !== undefined && (!name || name === p.name)) return;
+  const next = { ...p, ...patch, ...(name ? { name } : {}) };
+  if (patch.description !== undefined && !patch.description.trim()) delete next.description;
+  if (JSON.stringify(next) !== JSON.stringify(p)) editCanvas(patch.name !== undefined ? '重命名分区画布' : '修改分区画布说明', [{ op: 'partition.put', partition: next }]);
+}
+
+function hideDiagram(id: string) {
+  editCanvas('隐藏设计图', [{ op: 'hidden.set', items: [{ kind: 'diagram', id }], hidden: true }]);
+  state.selection = undefined;
+}
 
 const tableRelations = computed(() => {
   const t = target.value;
@@ -211,7 +251,50 @@ function cardinalityLabel(c: TblsCardinality): string {
 
 <template>
   <div class="inspector" @keydown.stop>
-    <p v-if="!state.selection" class="muted hint">选中画布上的表、字段或关系，在这里查看和编辑。双击画布空白处可以新建表。</p>
+    <p v-if="!state.selection" class="muted hint">选中画布上的表、字段、关系、设计图或分区框，在这里查看和编辑。双击画布空白处可以新建表。</p>
+
+    <template v-else-if="partition">
+      <h3>分区画布</h3>
+      <label>
+        名称
+        <input :value="partition.name" @change="updatePartition({ name: value($event) })" />
+      </label>
+      <label>
+        说明
+        <textarea :value="partition.description ?? ''" rows="2" @change="updatePartition({ description: value($event) })" />
+      </label>
+      <label>
+        命名空间
+        <span class="ns-row">
+          <span v-if="partitionNamespace" class="ns">{{ partitionNamespace.label }}</span>
+          <span class="muted">{{ partitionNamespace ? `${partitionNamespace.kind}${partitionNamespace.inherited ? '（继承自上级）' : ''}` : '未设置' }}</span>
+          <button class="secondary small" @click="post({ type: 'partition/namespace', id: partition.id })">设置…</button>
+        </span>
+      </label>
+      <p v-if="partitionView" class="muted">
+        本层 {{ partitionView.counts.tables }} 张设计表、{{ partitionView.counts.diagrams }} 张设计图、{{ partitionView.counts.partitions }} 个子分区画布
+      </p>
+      <div class="row-actions">
+        <button class="secondary" @click="setScope(partition.id)">进入</button>
+        <span class="spacer" />
+        <button class="secondary danger" @click="deletePartition(partition.id)">删除分区画布…</button>
+      </div>
+    </template>
+
+    <template v-else-if="diagram">
+      <h3>设计图</h3>
+      <p>
+        {{ diagram.name }} <span class="muted">（{{ diagramTypeLabel(diagram.type) }}）</span>
+      </p>
+      <p v-if="diagram.description" class="muted">{{ diagram.description }}</p>
+      <p v-if="diagram.pending" class="readonly">和表结构有 {{ diagram.pending }} 处不一致，可以在"待同步"页签中确认同步。</p>
+      <div class="row-actions">
+        <button @click="post({ type: 'diagram/open', diagram: diagram.id })">打开编辑</button>
+        <button class="secondary" @click="hideDiagram(diagram.id)">隐藏</button>
+        <span class="spacer" />
+        <button class="secondary danger" @click="deleteDiagram(diagram.id)">删除…</button>
+      </div>
+    </template>
 
     <template v-else-if="note">
       <h3>便签</h3>
@@ -525,6 +608,24 @@ textarea {
 
 .mono {
   font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.ns-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--hn-fg);
+}
+
+.ns {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--hn-muted) 20%, transparent);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.ns-row .small {
+  margin-left: auto;
 }
 
 .quick-error {

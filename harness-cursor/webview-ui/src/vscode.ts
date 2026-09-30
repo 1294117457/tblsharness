@@ -41,13 +41,13 @@ export function onHostMessage(handler: (message: HostMessage) => void): () => vo
 }
 
 let nextId = 0;
-const pending = new Map<string, { resolve: () => void; reject: (err: Error) => void }>();
+const pending = new Map<string, { resolve: (message?: string) => void; reject: (err: Error) => void }>();
 
 type RequestMessage = Extract<WebviewMessage, { requestId: string }>;
 type WithoutRequestId<T> = T extends unknown ? Omit<T, 'requestId'> : never;
 
-/** Sends a message carrying a requestId and resolves when the host replies. */
-export function request(message: WithoutRequestId<RequestMessage>): Promise<void> {
+/** Sends a message carrying a requestId and resolves with the host's optional summary when it replies. */
+export function request(message: WithoutRequestId<RequestMessage>): Promise<string | undefined> {
   const requestId = `r${++nextId}`;
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
@@ -55,11 +55,11 @@ export function request(message: WithoutRequestId<RequestMessage>): Promise<void
   });
 }
 
-export function settleReply(requestId: string, ok: boolean, error?: string): void {
+export function settleReply(requestId: string, ok: boolean, error?: string, message?: string): void {
   const p = pending.get(requestId);
   if (!p) return;
   pending.delete(requestId);
-  if (ok) p.resolve();
+  if (ok) p.resolve(message);
   else p.reject(new Error(error ?? '操作失败'));
 }
 

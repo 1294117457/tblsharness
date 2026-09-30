@@ -1,4 +1,4 @@
-﻿import * as vscode from 'vscode';
+import * as vscode from 'vscode';
 import { designFromSnapshot, emptyDesignSchema, emptyExt, type DesignDoc } from '../shared/designOps';
 import { DESIGN_DRIVERS, driverLabel, nextDefaultName, type DesignMeta } from '../shared/workspace';
 import { parseTblsJson } from '../tbls/runner';
@@ -100,10 +100,10 @@ export function registerDesignCommands(h: Harness): void {
     const id = await pickSourceId(h, ws, 'design', arg);
     const source = ws.design(id);
     const meta = await source.readMeta();
-    const canvasCount = (await source.canvasIds()).length;
+    const partitionCount = (await h.canvases.layout(ws.id, id)).partitions.length;
     const diagramCount = (await source.diagramIds()).length;
     const parts: string[] = [];
-    if (canvasCount) parts.push(`${canvasCount} 张画布`);
+    if (partitionCount) parts.push(`${partitionCount} 个分区画布`);
     if (diagramCount) parts.push(`${diagramCount} 张设计图`);
     await confirm(
       `确定删除设计画布"${meta.name}"吗？`,

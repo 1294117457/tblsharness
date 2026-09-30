@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 
-const props = defineProps<{ code: string }>();
+/** `compact`: no zoom bar, the diagram shrinks to fit (canvas cards). */
+const props = defineProps<{ code: string; compact?: boolean }>();
 
 const svg = ref('');
 const error = ref('');
@@ -11,6 +12,7 @@ const zoom = ref(1);
 type Mermaid = typeof import('mermaid').default;
 let mermaid: Promise<Mermaid> | undefined;
 let seq = 0;
+const uid = Math.random().toString(36).slice(2, 8);
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 function isDark(): boolean {
@@ -37,14 +39,14 @@ async function render(code: string) {
   rendering.value = true;
   try {
     const m = await load();
-    const out = await m.render(`hn-mermaid-${mine}`, code);
+    const out = await m.render(`hn-mermaid-${uid}-${mine}`, code);
     if (mine !== seq) return;
     svg.value = out.svg;
     error.value = '';
   } catch (err) {
     if (mine !== seq) return;
     error.value = (err as Error).message?.split('\n').slice(0, 4).join('\n') || String(err);
-    document.getElementById(`dhn-mermaid-${mine}`)?.remove();
+    document.getElementById(`dhn-mermaid-${uid}-${mine}`)?.remove();
   } finally {
     if (mine === seq) rendering.value = false;
   }
@@ -63,8 +65,8 @@ onUnmounted(() => clearTimeout(timer));
 </script>
 
 <template>
-  <div class="preview">
-    <div class="zoom">
+  <div class="preview" :class="{ compact }">
+    <div v-if="!compact" class="zoom">
       <button class="secondary small" title="缩小" @click="zoom = Math.max(0.2, zoom - 0.1)">−</button>
       <span class="muted">{{ Math.round(zoom * 100) }}%</span>
       <button class="secondary small" title="放大" @click="zoom = Math.min(3, zoom + 0.1)">+</button>
@@ -74,8 +76,8 @@ onUnmounted(() => clearTimeout(timer));
     <pre v-if="error" class="error">Mermaid 语法错误：{{ error }}</pre>
     <div class="canvas" :class="{ stale: !!error }">
       <!-- eslint-disable-next-line vue/no-v-html -- mermaid output, rendered with securityLevel strict -->
-      <div class="svg" :style="{ transform: `scale(${zoom})` }" v-html="svg" />
-      <p v-if="!svg && !error" class="muted empty">在左侧写 Mermaid，这里会显示预览。</p>
+      <div class="svg" :style="compact ? undefined : { transform: `scale(${zoom})` }" v-html="svg" />
+      <p v-if="!svg && !error" class="muted empty">{{ compact ? '（空白设计图，双击打开编辑）' : '在左侧写 Mermaid，这里会显示预览。' }}</p>
     </div>
   </div>
 </template>
@@ -121,5 +123,33 @@ onUnmounted(() => clearTimeout(timer));
 
 .empty {
   text-align: center;
+}
+
+.compact .canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.compact .svg :deep(svg) {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+}
+
+.compact .svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.compact .error {
+  padding: 4px 6px;
+  font-size: 11px;
 }
 </style>

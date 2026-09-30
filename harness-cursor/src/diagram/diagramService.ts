@@ -32,6 +32,9 @@ export class DiagramService implements vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<DiagramRef>();
   /** A diagram's text changed, including unsaved edits in an open editor. */
   readonly onDidChange = this.emitter.event;
+  private readonly createdEmitter = new vscode.EventEmitter<{ ref: DiagramRef; tables: string[] }>();
+  /** A sync from the diagram editor added tables; the layout places them at the diagram's level. */
+  readonly onDidCreateTables = this.createdEmitter.event;
   private readonly subscriptions: vscode.Disposable[] = [];
   /** Last sync applied from a diagram editor, per design. Canvas syncs use the canvas undo stack instead. */
   private readonly undo = new Map<string, UndoEntry>();
@@ -170,6 +173,8 @@ export class DiagramService implements vscode.Disposable {
     const text = serializeDesign(after);
     this.undo.set(`${ref.workspace}/${ref.design}`, { label: prepared.label, before, afterText: text.schema + text.ext });
     await this.setRefs(ref, prepared.refs);
+    const created = prepared.ops.filter((o) => o.op === 'table.add').map((o) => (o as { table: string }).table);
+    if (created.length) this.createdEmitter.fire({ ref, tables: created });
     return prepared;
   }
 
@@ -236,5 +241,6 @@ export class DiagramService implements vscode.Disposable {
   dispose(): void {
     while (this.subscriptions.length) this.subscriptions.pop()?.dispose();
     this.emitter.dispose();
+    this.createdEmitter.dispose();
   }
 }

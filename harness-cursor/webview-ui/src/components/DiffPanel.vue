@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { nodeId } from '@shared/canvas';
+import { DESIGN_SOURCE, nodeId } from '@shared/canvas';
 import type { DiffItem, DiffKind } from '@shared/model';
 import type { CanvasView } from '../canvas/viewModel';
 import { acceptDiff, canvas, focusNode, state } from '../store';
@@ -30,7 +30,7 @@ function designSide(item: DiffItem): boolean {
 function targetNode(item: DiffItem): string | undefined {
   const c = comparison.value;
   if (!c) return undefined;
-  const design = nodeId(c.design, item.table);
+  const design = nodeId(DESIGN_SOURCE, item.table);
   const db = nodeId(c.db, item.dbTable ?? state.comparison?.tableMappings[item.table] ?? item.table);
   if (designSide(item) && shown.value.has(design)) return design;
   if (shown.value.has(db)) return db;

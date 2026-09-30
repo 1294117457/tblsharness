@@ -11,6 +11,7 @@ import { registerWorkspaceCommands } from './commands/workspace';
 import { ConnectionPanels } from './connection/connectionPanel';
 import { EditPanels } from './edit/editPanel';
 import { ModelStore } from './model/store';
+import { TreeDragAndDrop } from './views/treeDragAndDrop';
 import { WorkspaceTreeProvider } from './views/workspaceTree';
 import { HarnessStorage } from './workspace/storage';
 
@@ -18,11 +19,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const storage = new HarnessStorage(context);
   const store = new ModelStore(storage, context.secrets);
   const tree = new WorkspaceTreeProvider(storage, store, context.secrets, context.extensionUri);
-  const treeView = vscode.window.createTreeView('harness.workspaces', { treeDataProvider: tree, showCollapseAll: true });
   const diagrams = new DiagramService(storage, store);
   tree.diagrams = diagrams;
   const canvases = CanvasEditorProvider.register(context, storage, store, diagrams);
-  tree.openCanvasName = (uri) => canvases.openDocument(uri)?.state.name;
+  tree.layoutOf = (workspace, design) => canvases.layout(workspace, design);
+  const treeView = vscode.window.createTreeView('harness.workspaces', {
+    treeDataProvider: tree,
+    showCollapseAll: true,
+    canSelectMany: true,
+    dragAndDropController: new TreeDragAndDrop(canvases),
+  });
   const h = { context, storage, store, tree, treeView, canvases, diagrams } as Harness;
   h.connections = new ConnectionPanels(h);
   h.editors = new EditPanels(h);
@@ -34,7 +40,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagrams,
     h.connections,
     h.editors,
-    canvases.onDidChangeOpenName(() => tree.refresh()),
+    canvases.onDidChangeLayout(() => tree.refresh()),
     DiagramEditorProvider.register(context, diagrams, store),
   );
   registerWorkspaceCommands(h);

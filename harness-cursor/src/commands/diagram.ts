@@ -4,12 +4,16 @@ import { DIAGRAM_TYPES, diagramTypeLabel, emptyDiagram, serializeDiagram, type D
 import { generateErDiagram } from '../shared/mermaid/er';
 import { driverLabel, nextDefaultName } from '../shared/workspace';
 import { readText } from '../workspace/fsUtil';
-import { closeTabsUnder, confirm, pickSourceId, pickWorkspace, promptName, register, required, revealInTree, type Harness, type NodeArg } from './common';
+import { confirm, pickSourceId, pickWorkspace, promptName, register, required, revealInTree, type Harness, type NodeArg } from './common';
 
 export interface DiagramCreateArg extends NodeArg {
   type?: DiagramType;
   /** Skip the "generate from tables" question and start with an empty diagram. */
   blank?: boolean;
+  /** Where the card goes on the canvas. */
+  at?: { x: number; y: number };
+  /** Created from the canvas toolbar: the card appears there, so the diagram editor is not opened. */
+  fromCanvas?: boolean;
 }
 
 export function registerDiagramCommands(h: Harness): void {
@@ -17,6 +21,7 @@ export function registerDiagramCommands(h: Harness): void {
     const arg = raw as DiagramCreateArg | undefined;
     const ws = await pickWorkspace(h, arg);
     const design = await pickSourceId(h, ws, 'design', arg);
+    const partition = arg?.kind === 'partition' ? arg.id : arg?.partition;
     const type =
       arg?.type ??
       required(
@@ -66,8 +71,9 @@ export function registerDiagramCommands(h: Harness): void {
     else if (type === 'er') file.code = 'erDiagram\n  %% 在这里写表，例如：\n  %% users {\n  %%   bigint id PK "主键"\n  %% }';
     const id = await ws.design(design).createDiagram(serializeDiagram(file));
     h.store.invalidate({ workspace: ws.id, kind: 'diagram', id: design, diagram: id });
-    void revealInTree(h, { kind: 'diagram', workspace: ws.id, design, id });
-    await openDiagram(ws.design(design).diagramUri(id));
+    await h.canvases.placeDiagram(ws.id, design, id, partition, arg?.at);
+    void revealInTree(h, { kind: 'diagram', workspace: ws.id, design, id, partition });
+    if (!arg?.fromCanvas) await openDiagram(ws.design(design).diagramUri(id));
   });
 
   register(h, 'harness.diagram.open', async (arg) => {
@@ -89,12 +95,11 @@ export function registerDiagramCommands(h: Harness): void {
   });
 
   register(h, 'harness.diagram.delete', async (arg) => {
-    const { ref, uri } = await diagramFromArg(h, arg);
+    const { ref } = await diagramFromArg(h, arg);
     const file = await h.diagrams.read(ref);
-    await confirm(`确定删除设计图“${file.meta.name}”吗？`, '只删除这张图，表结构不受影响。此操作不能撤销。', '删除');
-    await closeTabsUnder(uri);
-    await h.storage.workspace(ref.workspace).design(ref.design).removeDiagram(ref.diagram);
-    h.store.invalidate({ workspace: ref.workspace, kind: 'diagram', id: ref.design, diagram: ref.diagram });
+    const undoable = h.canvases.isOpen(ref.workspace, ref.design);
+    await confirm(`确定删除设计图“${file.meta.name}”吗？`, `只删除这张图，表结构不受影响。${undoable ? '可以在画布中按 Ctrl+Z 撤销。' : '此操作不能撤销。'}`, '删除');
+    await h.canvases.deleteDiagram(ref.workspace, ref.design, ref.diagram);
   });
 
   register(h, 'harness.diagram.copyForAI', async (arg) => {

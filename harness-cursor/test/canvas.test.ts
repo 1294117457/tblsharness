@@ -3,8 +3,11 @@ import {
   applyCanvasEdit,
   DESIGN_SOURCE,
   emptyCanvas,
+  nextPartitionId,
   parseCanvas,
   parseNodeId,
+  partitionContents,
+  partitionPath,
   removeDbFromCanvas,
   renameTableInCanvas,
   serializeCanvas,
@@ -13,103 +16,139 @@ import {
 
 function sample(): CanvasFile {
   return {
-    ...emptyCanvas('c'),
-    designTables: 'all',
+    ...emptyCanvas(),
+    partitions: [
+      { id: 'part1', name: '订单', x: 600, y: 0 },
+      { id: 'part2', name: '支付', parent: 'part1', x: 40, y: 320, namespace: { kind: 'schema', value: 'payment' } },
+    ],
     nodes: [
       { source: DESIGN_SOURCE, table: 'users', x: 0, y: 0 },
-      { source: 'db1', table: 'users', x: 300.4, y: 10.6 },
+      { source: DESIGN_SOURCE, table: 'orders', x: 20, y: 40, partition: 'part1' },
+      { source: DESIGN_SOURCE, table: 'payment.bills', x: 20, y: 40, partition: 'part2' },
+      { source: 'db1', table: 'users', x: 300.4, y: 10.6, partition: 'part1' },
     ],
+    diagrams: [{ id: 'diagram1', x: 0, y: 400, width: 360, height: 240, partition: 'part2' }],
+    notes: [{ id: 'n1', text: 'hi', x: 0, y: 0, width: 200, partition: 'part2' }],
     comparison: { db: 'db1', mode: 'overlay' },
   };
 }
 
 describe('canvas edits', () => {
-  it('nodes.put adds or moves and rounds positions', () => {
+  it('nodes.put adds or moves, rounds positions and keeps the partition', () => {
     const c = applyCanvasEdit(sample(), [
-      { op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table: 'users', x: 10.7, y: 5.2 }, { source: DESIGN_SOURCE, table: 'orders', x: 1, y: 2 }] },
+      { op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table: 'orders', x: 10.7, y: 5.2 }, { source: DESIGN_SOURCE, table: 'items', x: 1, y: 2 }] },
     ]);
-    expect(c.nodes).toContainEqual({ source: DESIGN_SOURCE, table: 'users', x: 11, y: 5 });
-    expect(c.nodes).toHaveLength(3);
+    expect(c.nodes).toContainEqual({ source: DESIGN_SOURCE, table: 'orders', x: 11, y: 5, partition: 'part1' });
+    expect(c.nodes).toHaveLength(5);
   });
 
-  it('nodes.put keeps per-node display settings', () => {
+  it('nodes.display sets and clears per-node display', () => {
     let c = applyCanvasEdit(sample(), [{ op: 'nodes.display', ids: [`${DESIGN_SOURCE}/users`], display: 'keys' }]);
-    c = applyCanvasEdit(c, [{ op: 'nodes.put', nodes: [{ source: DESIGN_SOURCE, table: 'users', x: 50, y: 50 }] }]);
-    expect(c.nodes.find((n) => n.source === DESIGN_SOURCE)!.display).toBe('keys');
+    expect(c.nodes.find((n) => n.table === 'users' && n.source === DESIGN_SOURCE)!.display).toBe('keys');
     c = applyCanvasEdit(c, [{ op: 'nodes.display', ids: [`${DESIGN_SOURCE}/users`] }]);
-    expect(c.nodes.find((n) => n.source === DESIGN_SOURCE)).not.toHaveProperty('display');
+    expect(c.nodes.find((n) => n.table === 'users' && n.source === DESIGN_SOURCE)).not.toHaveProperty('display');
+  });
+
+  it('hidden.set hides implicit tables and diagrams by creating entries, and shows them again', () => {
+    const s = sample();
+    const hidden = applyCanvasEdit(s, [{ op: 'hidden.set', hidden: true, items: [{ kind: 'table', id: 'design/logs' }, { kind: 'diagram', id: 'diagram9' }] }]);
+    expect(hidden.nodes.find((n) => n.table === 'logs')).toMatchObject({ hidden: true });
+    expect(hidden.diagrams.find((d) => d.id === 'diagram9')).toMatchObject({ hidden: true });
+    const shown = applyCanvasEdit(hidden, [{ op: 'hidden.set', hidden: false, items: [{ kind: 'table', id: 'design/logs' }] }]);
+    expect(shown.nodes.find((n) => n.table === 'logs')).not.toHaveProperty('hidden');
+    expect(applyCanvasEdit(s, [{ op: 'hidden.set', hidden: false, items: [{ kind: 'table', id: 'design/nope' }] }])).toBe(s);
+  });
+
+  it('move changes the level of tables, diagrams, notes and partitions', () => {
+    const c = applyCanvasEdit(sample(), [
+      {
+        op: 'move',
+        items: [
+          { kind: 'table', id: 'design/users', partition: 'part2', x: 5, y: 6 },
+          { kind: 'diagram', id: 'diagram1', partition: null, x: 1, y: 2 },
+          { kind: 'note', id: 'n1', partition: 'part1', x: 0, y: 0 },
+          { kind: 'table', id: 'design/implicit', partition: 'part1', x: 3, y: 3 },
+        ],
+      },
+    ]);
+    expect(c.nodes.find((n) => n.source === DESIGN_SOURCE && n.table === 'users')).toMatchObject({ partition: 'part2', x: 5, y: 6 });
+    expect(c.diagrams[0]).not.toHaveProperty('partition');
+    expect(c.notes[0].partition).toBe('part1');
+    expect(c.nodes.find((n) => n.table === 'implicit')!.partition).toBe('part1');
+  });
+
+  it('refuses to move a partition into itself or its descendants, or to a missing partition', () => {
+    const s = sample();
+    expect(applyCanvasEdit(s, [{ op: 'move', items: [{ kind: 'partition', id: 'part1', partition: 'part2', x: 0, y: 0 }] }])).toBe(s);
+    expect(applyCanvasEdit(s, [{ op: 'move', items: [{ kind: 'partition', id: 'part1', partition: 'part1', x: 0, y: 0 }] }])).toBe(s);
+    expect(applyCanvasEdit(s, [{ op: 'move', items: [{ kind: 'table', id: 'design/users', partition: 'part9', x: 0, y: 0 }] }])).toBe(s);
+    const out = applyCanvasEdit(s, [{ op: 'move', items: [{ kind: 'partition', id: 'part2', partition: null, x: 0, y: 0 }] }]);
+    expect(out.partitions.find((p) => p.id === 'part2')).not.toHaveProperty('parent');
+  });
+
+  it('partition.put allocates ids that are never reused', () => {
+    const s = sample();
+    expect(nextPartitionId(s)).toBe('part3');
+    const added = applyCanvasEdit(s, [{ op: 'partition.put', partition: { id: 'part3', name: '新分区', x: 0, y: 0 } }]);
+    expect(added.seq).toBe(3);
+    const removed = applyCanvasEdit(added, [{ op: 'partition.remove', id: 'part3' }]);
+    expect(nextPartitionId(removed)).toBe('part4');
+    expect(applyCanvasEdit(s, [{ op: 'partition.put', partition: { id: 'part5', name: 'x', parent: 'part9', x: 0, y: 0 } }])).toBe(s);
+  });
+
+  it('partition.remove drops the subtree and everything placed in it', () => {
+    const s = sample();
+    expect(partitionContents(s, 'part1')).toEqual({
+      partitions: ['part1', 'part2'],
+      designTables: ['orders', 'payment.bills'],
+      dbNodes: ['db1/users'],
+      diagrams: ['diagram1'],
+      notes: 1,
+    });
+    const c = applyCanvasEdit(s, [{ op: 'partition.remove', id: 'part1' }]);
+    expect(c.partitions).toEqual([]);
+    expect(c.nodes.map((n) => n.table)).toEqual(['users']);
+    expect(c.diagrams).toEqual([]);
+    expect(c.notes).toEqual([]);
+  });
+
+  it('partitionPath walks from the root down', () => {
+    expect(partitionPath(sample(), 'part2').map((p) => p.id)).toEqual(['part1', 'part2']);
+    expect(partitionPath(sample(), undefined)).toEqual([]);
   });
 
   it('removeDbFromCanvas removes db nodes and the comparison using it', () => {
     const c = removeDbFromCanvas(sample(), 'db1');
-    expect(c.nodes.map((n) => n.source)).toEqual([DESIGN_SOURCE]);
+    expect(c.nodes.every((n) => n.source === DESIGN_SOURCE)).toBe(true);
     expect(c.comparison).toBeUndefined();
-  });
-
-  it('removeDbFromCanvas returns same object when db not referenced', () => {
     const s = sample();
     expect(removeDbFromCanvas(s, 'db99')).toBe(s);
   });
 
   it('renames design tables only', () => {
     const c = renameTableInCanvas(sample(), 'users', 'accounts');
-    expect(c.nodes.map((n) => `${n.source}/${n.table}`).sort()).toEqual(['db1/users', `${DESIGN_SOURCE}/accounts`]);
+    expect(c.nodes.map((n) => `${n.source}/${n.table}`)).toContain('design/accounts');
+    expect(c.nodes.map((n) => `${n.source}/${n.table}`)).toContain('db1/users');
     expect(renameTableInCanvas(c, 'nonexistent', 'x')).toBe(c);
   });
 
   it('parses node ids whose table contains a schema prefix', () => {
     expect(parseNodeId('db1/pgmq.meta')).toEqual({ source: 'db1', table: 'pgmq.meta' });
   });
-
-  it('renames the canvas with meta.set and ignores no-op or blank names', () => {
-    const c = sample();
-    const renamed = applyCanvasEdit(c, [{ op: 'meta.set', name: '  下单流程 ' }]);
-    expect(renamed.name).toBe('下单流程');
-    expect(applyCanvasEdit(renamed, [{ op: 'meta.set', name: '下单流程' }])).toBe(renamed);
-    expect(applyCanvasEdit(renamed, [{ op: 'meta.set', name: '   ' }])).toBe(renamed);
-    expect(applyCanvasEdit(renamed, [{ op: 'meta.set', description: '说明' }]).description).toBe('说明');
-  });
-
-  it('designTables.set changes the mode', () => {
-    const c = sample();
-    const picked = applyCanvasEdit(c, [{ op: 'designTables.set', mode: 'picked' }]);
-    expect(picked.designTables).toBe('picked');
-    expect(applyCanvasEdit(picked, [{ op: 'designTables.set', mode: 'picked' }])).toBe(picked);
-  });
-
-  it('zone.put adds or updates zones', () => {
-    const c = applyCanvasEdit(sample(), [{ op: 'zone.put', zone: { id: 'z1', name: '用户', x: 0, y: 0, width: 500, height: 400 } }]);
-    expect(c.zones).toHaveLength(1);
-    expect(c.zones[0].name).toBe('用户');
-    const updated = applyCanvasEdit(c, [{ op: 'zone.put', zone: { id: 'z1', name: '订单', x: 10, y: 10, width: 600, height: 500 } }]);
-    expect(updated.zones).toHaveLength(1);
-    expect(updated.zones[0].name).toBe('订单');
-  });
-
-  it('zone.remove removes a zone', () => {
-    const c = applyCanvasEdit(sample(), [
-      { op: 'zone.put', zone: { id: 'z1', name: 'A', x: 0, y: 0, width: 100, height: 100 } },
-      { op: 'zone.put', zone: { id: 'z2', name: 'B', x: 200, y: 0, width: 100, height: 100 } },
-    ]);
-    const after = applyCanvasEdit(c, [{ op: 'zone.remove', id: 'z1' }]);
-    expect(after.zones).toHaveLength(1);
-    expect(after.zones[0].id).toBe('z2');
-  });
 });
 
-describe('canvas files', () => {
+describe('layout files', () => {
   it('round-trips and serializes stably', () => {
-    const text = serializeCanvas(sample());
-    const again = serializeCanvas(parseCanvas(text));
-    expect(again).toBe(text);
+    const text = serializeCanvas({ ...sample(), viewports: { root: { x: 1.234, y: 2, zoom: 0.5 } } });
+    expect(serializeCanvas(parseCanvas(text))).toBe(text);
     expect(text.endsWith('\n')).toBe(true);
     expect(JSON.parse(text).nodes[0]).toMatchObject({ source: 'db1', x: 300, y: 11 });
   });
 
-  it('fills defaults for empty or partial files', () => {
-    const c = parseCanvas('');
-    expect(c).toMatchObject({ version: 2, nodes: [], notes: [], settings: { columnDisplay: 'all' } });
-    expect(c.designTables).toBe('picked');
-    expect(c.zones).toEqual([]);
+  it('fills defaults for empty or partial files and drops dangling partition references', () => {
+    expect(parseCanvas('')).toMatchObject({ version: 3, partitions: [], nodes: [], diagrams: [], notes: [], settings: { columnDisplay: 'all' } });
+    const c = parseCanvas(JSON.stringify({ partitions: [{ id: 'part1', name: 'A', parent: 'part7' }], nodes: [{ source: 'design', table: 't', partition: 'part9' }] }));
+    expect(c.partitions[0]).not.toHaveProperty('parent');
+    expect(c.nodes[0]).not.toHaveProperty('partition');
   });
 });

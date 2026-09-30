@@ -1,9 +1,9 @@
-﻿import * as vscode from 'vscode';
+import * as vscode from 'vscode';
 import { friendlyTblsError } from '../connection/errors';
 import { buildDsn, describeProfile, parseStoredConnection, secretsOf, serializeConnection } from '../shared/connection';
 import { maskSecret, parseTblsJson, stripDsnFromTblsConfig, TblsError, tblsOutJson } from '../tbls/runner';
 import { readText, writeText } from '../workspace/fsUtil';
-import { canvasNamesReferencingDb, deleteDbFromDesigns } from '../workspace/refactor';
+import { deleteDbFromDesigns, designNamesReferencingDb } from '../workspace/refactor';
 import type { DbSource } from '../workspace/storage';
 import { closeTabsUnder, confirm, pickSourceId, pickWorkspace, register, required, type Harness, type NodeArg } from './common';
 
@@ -122,10 +122,10 @@ export function registerDbCommands(h: Harness): void {
   register(h, 'harness.db.delete', async (arg) => {
     const db = await pickDb(h, arg);
     const name = await nameOf(db);
-    const canvases = await canvasNamesReferencingDb(db.workspace, db.id);
+    const designs = await designNamesReferencingDb(db.workspace, db.id);
     await confirm(
       `确定删除数据库“${name}”吗？`,
-      `会删除它的所有快照和已保存的连接，不会影响真实数据库。${canvases.length ? `\n以下画布会移除这个数据源：${canvases.join('、')}` : ''}`,
+      `会删除它的所有快照和已保存的连接，不会影响真实数据库。${designs.length ? `\n以下设计画布会移除这个数据源：${designs.join('、')}` : ''}`,
       '删除',
     );
     await deleteDbFromDesigns(db.workspace, h.canvases, db.id);

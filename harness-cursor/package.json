@@ -109,7 +109,7 @@
       },
       {
         "command": "harness.design.open",
-        "title": "打开表结构（ER 画布）",
+        "title": "打开设计画布",
         "category": "Harness",
         "icon": "$(type-hierarchy)"
       },
@@ -199,24 +199,44 @@
         "category": "Harness"
       },
       {
-        "command": "harness.canvas.create",
-        "title": "新建画布",
+        "command": "harness.partition.open",
+        "title": "打开分区画布",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.partition.create",
+        "title": "新建分区画布",
         "category": "Harness",
         "icon": "$(add)"
       },
       {
-        "command": "harness.canvas.open",
-        "title": "打开画布",
+        "command": "harness.partition.rename",
+        "title": "重命名分区画布",
         "category": "Harness"
       },
       {
-        "command": "harness.canvas.rename",
-        "title": "重命名画布",
+        "command": "harness.partition.delete",
+        "title": "删除分区画布",
         "category": "Harness"
       },
       {
-        "command": "harness.canvas.delete",
-        "title": "删除画布",
+        "command": "harness.partition.setNamespace",
+        "title": "命名空间…",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.item.copy",
+        "title": "复制",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.item.cut",
+        "title": "剪切",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.item.paste",
+        "title": "粘贴",
         "category": "Harness"
       },
       {
@@ -252,7 +272,7 @@
     "viewsWelcome": [
       {
         "view": "harness.workspaces",
-        "contents": "工作区用来组织设计库、数据库结构和画布。不需要连接数据库，也可以直接开始设计。\n[新建工作区](command:harness.workspace.create)\n工作区保存在插件自己的存储目录中，不会写入你的项目。"
+        "contents": "工作区用来组织设计画布和数据库结构。不需要连接数据库，也可以直接开始设计。\n[新建工作区](command:harness.workspace.create)\n工作区保存在插件自己的存储目录中，不会写入你的项目。"
       }
     ],
     "customEditors": [
@@ -261,7 +281,7 @@
         "displayName": "Harness 画布",
         "selector": [
           {
-            "filenamePattern": "*.canvas.json"
+            "filenamePattern": "**/design/*/layout.json"
           }
         ],
         "priority": "default"
@@ -288,6 +308,24 @@
         "command": "harness.rename",
         "key": "f2",
         "when": "focusedView == harness.workspaces"
+      },
+      {
+        "command": "harness.item.copy",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == harness.workspaces"
+      },
+      {
+        "command": "harness.item.cut",
+        "key": "ctrl+x",
+        "mac": "cmd+x",
+        "when": "focusedView == harness.workspaces"
+      },
+      {
+        "command": "harness.item.paste",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "focusedView == harness.workspaces && harness.clipboard"
       }
     ],
     "menus": {
@@ -325,13 +363,58 @@
       "view/item/context": [
         {
           "command": "harness.edit",
-          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|canvas)$/",
+          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|partition)$/",
           "group": "inline@9"
         },
         {
           "command": "harness.edit",
-          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|canvas)$/",
+          "when": "view == harness.workspaces && viewItem =~ /^(workspace|design|partition)$/",
           "group": "9_manage@0"
+        },
+        {
+          "command": "harness.partition.create",
+          "when": "view == harness.workspaces && viewItem == levelGroup.partitions",
+          "group": "inline"
+        },
+        {
+          "command": "harness.partition.create",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|partition|levelGroup\\.partitions)$/",
+          "group": "2_edit@2"
+        },
+        {
+          "command": "harness.partition.open",
+          "when": "view == harness.workspaces && viewItem == partition",
+          "group": "1_open@0"
+        },
+        {
+          "command": "harness.partition.setNamespace",
+          "when": "view == harness.workspaces && viewItem == partition",
+          "group": "2_edit@3"
+        },
+        {
+          "command": "harness.partition.rename",
+          "when": "view == harness.workspaces && viewItem == partition",
+          "group": "9_manage@1"
+        },
+        {
+          "command": "harness.partition.delete",
+          "when": "view == harness.workspaces && viewItem == partition",
+          "group": "9_manage@2"
+        },
+        {
+          "command": "harness.item.copy",
+          "when": "view == harness.workspaces && viewItem =~ /^(partition|diagram|table\\.design)$/",
+          "group": "5_clipboard@1"
+        },
+        {
+          "command": "harness.item.cut",
+          "when": "view == harness.workspaces && viewItem =~ /^(partition|diagram|table\\.design)$/",
+          "group": "5_clipboard@2"
+        },
+        {
+          "command": "harness.item.paste",
+          "when": "view == harness.workspaces && harness.clipboard && viewItem =~ /^(design|partition|levelGroup\\..*)$/",
+          "group": "5_clipboard@3"
         },
         {
           "command": "harness.workspace.add",
@@ -347,11 +430,6 @@
           "command": "harness.db.create",
           "when": "view == harness.workspaces && viewItem == workspace",
           "group": "1_new@2"
-        },
-        {
-          "command": "harness.canvas.create",
-          "when": "view == harness.workspaces && viewItem == workspace",
-          "group": "1_new@3"
         },
         {
           "command": "harness.workspace.rename",
@@ -379,53 +457,33 @@
           "group": "inline"
         },
         {
-          "command": "harness.canvas.create",
-          "when": "view == harness.workspaces && viewItem == group.canvas",
-          "group": "inline"
-        },
-        {
-          "command": "harness.source.addToCanvas",
-          "when": "view == harness.workspaces && viewItem == design",
-          "group": "inline"
-        },
-        {
-          "command": "harness.source.addToCanvas",
-          "when": "view == harness.workspaces && viewItem == design",
-          "group": "1_open@1"
-        },
-        {
           "command": "harness.design.open",
-          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|levelGroup\\.tables)$/",
           "group": "1_open@0"
         },
         {
           "command": "harness.design.openRaw",
-          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "when": "view == harness.workspaces && viewItem == design",
           "group": "1_open@2"
         },
         {
           "command": "harness.design.openExt",
-          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "when": "view == harness.workspaces && viewItem == design",
           "group": "1_open@3"
         },
         {
           "command": "harness.design.copyForAI",
-          "when": "view == harness.workspaces && viewItem =~ /^(design|designTables)$/",
+          "when": "view == harness.workspaces && viewItem == design",
           "group": "1_open@4"
         },
         {
-          "command": "harness.design.open",
-          "when": "view == harness.workspaces && viewItem == designTables",
-          "group": "inline"
-        },
-        {
           "command": "harness.diagram.create",
-          "when": "view == harness.workspaces && viewItem =~ /^(design|diagramGroup)$/",
+          "when": "view == harness.workspaces && viewItem =~ /^(design|partition|levelGroup\\.diagrams)$/",
           "group": "2_edit@0"
         },
         {
           "command": "harness.diagram.create",
-          "when": "view == harness.workspaces && viewItem == diagramGroup",
+          "when": "view == harness.workspaces && viewItem == levelGroup.diagrams",
           "group": "inline"
         },
         {
@@ -524,21 +582,6 @@
           "group": "9_manage@2"
         },
         {
-          "command": "harness.canvas.open",
-          "when": "view == harness.workspaces && viewItem == canvas",
-          "group": "1_open@1"
-        },
-        {
-          "command": "harness.canvas.rename",
-          "when": "view == harness.workspaces && viewItem == canvas",
-          "group": "9_manage@1"
-        },
-        {
-          "command": "harness.canvas.delete",
-          "when": "view == harness.workspaces && viewItem == canvas",
-          "group": "9_manage@2"
-        },
-        {
           "command": "harness.table.revealInCanvas",
           "when": "view == harness.workspaces && viewItem =~ /^table\\./",
           "group": "inline"
@@ -550,7 +593,7 @@
         },
         {
           "command": "harness.source.addToCanvas",
-          "when": "view == harness.workspaces && viewItem =~ /^table\\./",
+          "when": "view == harness.workspaces && viewItem == table.db",
           "group": "1_open@2"
         }
       ],
@@ -573,6 +616,34 @@
         },
         {
           "command": "harness.design.createBlank",
+          "when": "false"
+        },
+        {
+          "command": "harness.partition.open",
+          "when": "false"
+        },
+        {
+          "command": "harness.partition.rename",
+          "when": "false"
+        },
+        {
+          "command": "harness.partition.delete",
+          "when": "false"
+        },
+        {
+          "command": "harness.partition.setNamespace",
+          "when": "false"
+        },
+        {
+          "command": "harness.item.copy",
+          "when": "false"
+        },
+        {
+          "command": "harness.item.cut",
+          "when": "false"
+        },
+        {
+          "command": "harness.item.paste",
           "when": "false"
         }
       ]

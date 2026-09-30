@@ -23,11 +23,11 @@ const hiddenCount = computed(() => props.data.columns.length - props.data.visibl
     class="table-node"
     :class="[data.mark && `mark-${data.mark}`, `source-${data.sourceKind}`, { selected, view: data.isView, missing: data.missing }]"
     :style="{ width: `${NODE_WIDTH}px` }"
-    :title="data.note ?? data.comment"
+    :title="[data.namespaceTag ? `真实表名：${data.key}` : '', data.note ?? data.comment ?? ''].filter(Boolean).join('\n') || undefined"
   >
     <div class="header" :style="{ height: `${HEADER_HEIGHT}px` }">
       <Handle :id="`${TABLE_HANDLE}:t`" type="target" :position="Position.Left" class="handle" :connectable="false" />
-      <span class="name">{{ data.key }}</span>
+      <span class="name"><span v-if="data.namespaceTag" class="ns">{{ data.namespaceTag }}</span>{{ data.displayName }}</span>
       <span class="badge" :title="data.sourceKind === 'db' ? '数据库（只读）' : '设计库'">
         <span v-if="data.sourceKind === 'db'" class="lock">🔒</span>{{ data.sourceName }}
       </span>
@@ -98,6 +98,17 @@ const hiddenCount = computed(() => props.data.columns.length - props.data.visibl
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ns {
+  margin-right: 2px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--hn-muted) 20%, transparent);
+  color: var(--hn-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  font-weight: 400;
 }
 
 .badge {

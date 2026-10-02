@@ -20,13 +20,15 @@ const emit = defineEmits<{
   'node-menu': [payload: { id: string; x: number; y: number; flow: Position }];
   'pane-menu': [payload: { x: number; y: number; flow: Position }];
   pending: [diagram: string];
-  'resize-partition': [payload: { id: string; width: number; height: number }];
 }>();
 
 const FLOW_ID = 'harness-canvas';
 /** Zooming in to a single small table beyond this makes it fill the screen. */
 const FOCUS_MAX_ZOOM = 1.5;
 const MIN_ZOOM = 0.05;
+/** Drag hysteresis: must move this far inside a frame to enter it, and this far outside to leave it. */
+const DRAG_ENTER_INSET = 16;
+const DRAG_LEAVE_OUTSET = 16;
 const {
   fitView,
   setViewport,
@@ -195,7 +197,7 @@ watch(
 );
 
 watch(
-  () => [state.selection, dropTarget.value],
+  () => state.selection,
   () => rebuild(),
 );
 
@@ -354,6 +356,23 @@ function frameAt(point: Position, exclude: Set<string> = new Set()): string | un
   return best;
 }
 
+/** Like `frameAt`, but each frame's bounds are shrunk by `inset` pixels on every side. Used for drag hysteresis. */
+function frameAtInset(point: Position, exclude: Set<string>, inset: number): string | undefined {
+  let best: string | undefined;
+  let bestDepth = -1;
+  for (const p of props.view.partitions) {
+    if (p.collapsed || exclude.has(p.id)) continue;
+    const r = absRect(`part:${p.id}`);
+    if (!r) continue;
+    if (point.x < r.x + inset || point.x > r.x + r.w - inset || point.y < r.y + inset || point.y > r.y + r.h - inset) continue;
+    if (p.depth > bestDepth) {
+      best = p.id;
+      bestDepth = p.depth;
+    }
+  }
+  return best;
+}
+
 /** Converts an absolute flow point to coordinates inside a level (the root uses absolute ones). */
 function relativeTo(level: string | undefined, point: Position): Position {
   if (!level) return point;
@@ -384,7 +403,24 @@ function centerOf(node: GraphNode): Position {
 }
 
 onNodeDrag(({ node }) => {
-  const target = frameAt(centerOf(node), excludedFor(node));
+  const center = centerOf(node);
+  const exclude = excludedFor(node);
+  const current = dropTarget.value;
+  if (current) {
+    // Already hovering a frame: keep it unless the pointer leaves the outset band, so small jitters don't flip the target.
+    const r = absRect(`part:${current}`);
+    if (
+      r &&
+      center.x >= r.x - DRAG_LEAVE_OUTSET &&
+      center.x <= r.x + r.w + DRAG_LEAVE_OUTSET &&
+      center.y >= r.y - DRAG_LEAVE_OUTSET &&
+      center.y <= r.y + r.h + DRAG_LEAVE_OUTSET
+    ) {
+      return;
+    }
+  }
+  // Strict bounds to enter a frame; `target !== currentLevel` means we'd actually change the level.
+  const target = frameAtInset(center, exclude, DRAG_ENTER_INSET);
   const next = target !== levelOf(node.id) ? target : undefined;
   if (next !== dropTarget.value) dropTarget.value = next;
 });
@@ -449,7 +485,7 @@ onNodeClick(({ node }) => {
   select(ref.kind === 'table' ? { type: 'table', nodeId: node.id } : { type: ref.kind, id: ref.id });
 });
 
-onNodeDoubleClick(({ node, event }) => {
+onNodeDoubleClick(({ node }) => {
   const ref = itemOfFlowId(node.id);
   if (ref.kind === 'diagram') {
     select({ type: 'diagram', id: ref.id });

@@ -19,6 +19,10 @@ export interface CanvasPartition {
   parent?: string;
   x: number;
   y: number;
+  /** Manual minimum width; actual width is `max(this, content bounding box, PART_MIN.width)`. */
+  width?: number;
+  /** Manual minimum height; actual height is `max(this, content bounding box, PART_MIN.height)`. */
+  height?: number;
   collapsed?: boolean;
   namespace?: CanvasNamespace;
 }
@@ -253,7 +257,13 @@ function applyOp(canvas: CanvasFile, op: CanvasOp): CanvasFile {
     case 'move':
       return moveItems(canvas, op.items);
     case 'partition.put': {
-      const p = clean({ ...op.partition, x: Math.round(op.partition.x), y: Math.round(op.partition.y) });
+      const p = clean({
+        ...op.partition,
+        x: Math.round(op.partition.x),
+        y: Math.round(op.partition.y),
+        width: op.partition.width !== undefined ? Math.round(op.partition.width) : undefined,
+        height: op.partition.height !== undefined ? Math.round(op.partition.height) : undefined,
+      });
       if (!p.name.trim()) return canvas;
       if (p.parent && (p.parent === p.id || !canvas.partitions.some((x) => x.id === p.parent) || partitionSubtree(canvas, p.id).has(p.parent))) return canvas;
       const i = canvas.partitions.findIndex((x) => x.id === p.id);
@@ -430,7 +440,7 @@ export function parseCanvas(text: string): CanvasFile {
 
   canvas.partitions = arr(raw.partitions)
     .filter((p) => str(p?.id))
-    .map((p) => clean({ id: String(p.id), name: str(p.name) ?? String(p.id), description: str(p.description), parent: str(p.parent), x: num(p.x), y: num(p.y), collapsed: p.collapsed === true, namespace: parseNamespace(p.namespace) }));
+    .map((p) => clean({ id: String(p.id), name: str(p.name) ?? String(p.id), description: str(p.description), parent: str(p.parent), x: num(p.x), y: num(p.y), width: num(p.width) > 0 ? num(p.width) : undefined, height: num(p.height) > 0 ? num(p.height) : undefined, collapsed: p.collapsed === true, namespace: parseNamespace(p.namespace) }));
   const partitionIds = new Set(canvas.partitions.map((p) => p.id));
   for (const p of canvas.partitions) if (p.parent && !partitionIds.has(p.parent)) delete p.parent;
   const inPartition = (v: unknown) => {
@@ -473,7 +483,7 @@ const byNumericId = (a: { id: string }, b: { id: string }) => a.id.localeCompare
 export function serializeCanvas(canvas: CanvasFile): string {
   const out: Record<string, unknown> = { version: 3 };
   if (canvas.seq) out.seq = canvas.seq;
-  out.partitions = [...canvas.partitions].sort(byNumericId).map((p) => clean({ ...p, x: round(p.x), y: round(p.y) }));
+  out.partitions = [...canvas.partitions].sort(byNumericId).map((p) => clean({ ...p, x: round(p.x), y: round(p.y), width: p.width !== undefined ? round(p.width) : undefined, height: p.height !== undefined ? round(p.height) : undefined }));
   out.nodes = [...canvas.nodes]
     .sort((a, b) => nodeId(a.source, a.table).localeCompare(nodeId(b.source, b.table)))
     .map((n) => clean({ ...n, x: round(n.x), y: round(n.y) }));

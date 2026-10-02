@@ -96,6 +96,15 @@ describe('canvas edits', () => {
     expect(applyCanvasEdit(s, [{ op: 'partition.put', partition: { id: 'part5', name: 'x', parent: 'part9', x: 0, y: 0 } }])).toBe(s);
   });
 
+  it('partition.put stores and rounds width/height, and they round-trip through serialize/parse', () => {
+    const s = sample();
+    const resized = applyCanvasEdit(s, [{ op: 'partition.put', partition: { id: 'part1', name: '订单', x: 600, y: 0, width: 520.7, height: 360.4 } }]);
+    expect(resized.partitions.find((p) => p.id === 'part1')).toMatchObject({ width: 521, height: 360 });
+    const text = serializeCanvas(resized);
+    const parsed = parseCanvas(text);
+    expect(parsed.partitions.find((p) => p.id === 'part1')).toMatchObject({ width: 521, height: 360 });
+  });
+
   it('partition.remove drops the subtree and everything placed in it', () => {
     const s = sample();
     expect(partitionContents(s, 'part1')).toEqual({

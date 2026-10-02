@@ -1,7 +1,7 @@
 # Harness 工程索引（当前实现）
 
 > 面向开发者和 AI agent 的快速上手索引。先读"一分钟概览"和"目录地图"，改功能时查"改什么去哪里"。
-> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-30（第二阶段修复文档 3 完成：R1 去掉层级切换改为整张画布渲染+聚焦；R2 聚焦按钮 ⤢ / F 快捷键；R3 右侧设计图 Mermaid 编辑（DiagramInspector + MermaidCodeEditor）；R4 DbTableInspector 只读结构视图、分区内容列表、空选中当前层概况）。
+> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-30（第二阶段修复文档 4 完成：去双击创建表、P2 分区画布手动调整大小 + 任意位置拖动、P3 拖动节点到分区框边缘时用迟滞带消除闪烁）。
 
 ## 1. 一分钟概览
 
@@ -73,8 +73,10 @@ harness-cursor/
 │  │  ├─ model.ts          统一模型 NormalizedSchema/NTable/NColumn/NRelation、RelationKind、DesignExt、DiffItem/DiffResult
 │  │  ├─ workspace.ts      文件元数据类型（WorkspaceMeta/DesignMeta/DbSourceMeta/HarnessRootMeta/ComparisonsFile/ComparisonEntry）、ID 与默认名规则（nextSeq/nextDefaultName/uniqueName）、DESIGN_DRIVERS
 │  │  ├─ canvas.ts         ★ 布局文件类型 CanvasFile v3（partitions / nodes / diagrams / notes / seq / viewports 按层）、
-│  │  │                    CanvasOp（nodes.put/remove/display、diagrams.put/remove、hidden.set、move、partition.put/remove、note.put/remove、comparison.set、settings.set）、
-│  │  │                    applyCanvasEdit（纯函数）、parse/serializeCanvas、partitionSubtree/partitionPath/partitionOf/partitionContents、nextPartitionId、
+│  │  │                    CanvasPartition { id, name, description?, parent?, x, y, width?, height?, collapsed?, namespace? }：width/height 是手动最小值，
+│  │  │                    最终大小 = max(手动, 内容包围盒 + padding, PART_MIN)；折叠时固定为 PART_COLLAPSED，不受 width/height 影响
+│  │  │                    CanvasOp（nodes.put/remove/display、diagrams.put/remove、hidden.set、move、partition.put/remove（含 width/height）、note.put/remove、comparison.set、settings.set）、
+│  │  │                    applyCanvasEdit（纯函数）、parse/serializeCanvas（round + 稳定排序 + 容错）、partitionSubtree/partitionPath/partitionOf/partitionContents、nextPartitionId、
 │  │  │                    removeDbFromCanvas、removeDiagramFromCanvas、renameTableInCanvas、nodeId/parseNodeId、ItemRef/MoveItem
 │  │  ├─ namespace.ts      ★ 命名空间：按库类型默认 schema/前缀、继承计算 effectiveNamespace、qualify/shortName/inNamespace、落地命名 landingName（_copy 规则）、copyNamespace
 │  │  ├─ clipboard.ts      ★ 复制 / 剪切纯函数：planCopy（深度复制、改名、外键改指向、设计图副本）、planCut（换层、命名空间改名）、topLevelItems、levelTables
@@ -126,13 +128,14 @@ harness-cursor/
 │  ├─ store.ts             ★ 画布页面状态：canvas(shallowRef)、design、sources、diagrams、catalog、comparison、level（当前层）、clipboard、selection（table/column/relation/note/diagram/partition）；
 │  │                       editCanvas / designOp / setLevel / setClipboard / paste / moveItems / deletePartition / deleteDiagram / acceptDiff / focusNode / focusItems / focusLevel / reveal；savedViewport（根视口）
 │  ├─ App.vue              ★ 画布页面外壳：面包屑（当前层路径 + 聚焦）、工具栏（新建表、+ 设计图 ▾、+ 分区画布、+ 便签、自动布局、字段显示、对比）、按当前层创建、
-│  │                       Ctrl+C / X / V、Esc 先清选中再缩放到父层、F 聚焦选中、Delete = 隐藏、右键菜单、左右面板折叠成 32px 竖条（记住状态）
+│  │                       Ctrl+C / X / V、Esc 先清选中再缩放到父层、F 聚焦选中、Delete = 隐藏、右键菜单、左右面板折叠成 32px 竖条（记住状态）；
+│  │                       新建表只能通过工具栏 / 右键 / 属性面板，**不再支持双击画布空白或框内**（容易误触）
 │  ├─ canvas/viewModel.ts  ★ buildView(canvas, sources, comparison, diagrams)：总是从根生成全部层 → tables（displayName/namespaceTag）/ edges / partitions（父在前）/ diagrams / notes / levels（各层内容列表）
 │  ├─ canvas/layout.ts     ★ elkjs 自动布局：layoutTables、layoutLevel（多层复合节点，INCLUDE_CHILDREN）、placeNewTables
 │  ├─ components/
-│  │  ├─ CanvasView.vue    ★ Vue Flow 画布：分区框用 parentNode 嵌套（坐标相对父框）；拖入 / 拖出分区框（跨层走 items/move）；双击框内新建表、双击分区标题聚焦；设计图卡片可调大小；onlyRenderVisibleElements；focusOn 自算 bbox + maxZoom 1.5
+│  │  ├─ CanvasView.vue    ★ Vue Flow 画布：分区框用 parentNode 嵌套（坐标相对父框）；拖入 / 拖出分区框（跨层走 items/move，用迟滞带 DRAG_ENTER_INSET/DRAG_LEAVE_OUTSET=16px 避免边缘闪烁，dropTarget 只更新高亮不再触发 rebuild）；双击设计图卡片 = 右侧 Mermaid 编辑获得焦点；双击分区框任意位置 = 聚焦；设计图卡片可调大小；onlyRenderVisibleElements；focusOn 自算 bbox + maxZoom 1.5
 │  │  ├─ TableNode.vue     表节点（短名 + 灰色命名空间标签，悬停显示真实表名，选中时 FocusButton）
-│  │  ├─ PartitionNode.vue ★ 分区框：标题栏（折叠、名称、命名空间、数量、聚焦 ⤢），双击标题 = 聚焦
+│  │  ├─ PartitionNode.vue ★ 分区框：标题栏（折叠、名称、命名空间、数量、聚焦 ⤢），双击标题/任意空白 = 聚焦，标题以外的任意位置（不在子节点上）都可以拖动整体框架；未折叠时右下角调整大小手柄（拖动时显示草稿尺寸，emit resize 由 CanvasView 写入 partition.put）；collapsed 状态隐藏手柄
 │  │  ├─ DiagramNode.vue   ★ 设计图卡片：Mermaid 预览（MermaidPreview compact）、类型、"待同步 N"、选中时 FocusButton、右下角调整大小
 │  │  ├─ NoteNode.vue      便签节点（选中时 FocusButton）
 │  │  ├─ FocusButton.vue   选中时显示的 ⤢ 聚焦按钮，点击 → focusItems
@@ -181,7 +184,8 @@ harness-cursor/
 **`layout.json` 要点**：
 
 - `nodes` 是数组（设计表 `source:'design'` 和数据库表 `source:dbN` 放在一起），每条可带 `partition`、`hidden`、`display`。一张表（含数据库表）在一个设计画布里只出现在一层。
-- 坐标相对所在的分区框左上角；在根画布上是绝对坐标。分区框宽高不存，按内容自动计算。
+- 坐标相对所在的分区框左上角；在根画布上是绝对坐标。
+- 分区框可带 `width?` / `height?`（手动最小值）。最终大小 = `max(手动, 内容包围盒 + padding, PART_MIN)`：空分区框保留至少 PART_MIN（320×160）大小以便圈地；内容超出时撑大。折叠时固定 PART_COLLAPSED（240×58），手动值不生效。
 - `schema.json` 里有、`layout.json` 没记录的设计表（例如 AI 直接改了 `schema.json`）和没记录的设计图：显示在根画布上（自动排位），复制 / 剪切前会先写入记录。
 - 分区画布 ID `partN` 由 `layout.json` 的 `seq` 分配，只增不复用。
 - `partitions[].namespace = {kind:'schema'|'prefix', value}`；`prefix` 的值自动补 `_`。
@@ -251,12 +255,13 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 - **整张画布渲染 + 当前层 + 聚焦**（修复文档 3 R1–R2）：画布始终渲染全部层（不再按 scope 裁剪），`buildView` 从根构建。当前层（`level`）只影响左侧面板列表、工具栏新建位置和粘贴目标。面包屑显示当前层路径，点击 = `focusLevel`（缩放视图而不切换页面）。`Esc`：先清选中，再缩放到父层。选中对象右上角显示聚焦按钮 `⤢`，`F` 快捷键 = 聚焦选中的 bounding box。`focusOn()` 自算 bbox + maxZoom 1.5。`onlyRenderVisibleElements` 始终开启。只记一个根视口（`savedViewport`）。
 - **当前层规则**：选中分区框 = 这个分区；选中表 / 图 / 便签 = 它所在的层；点画布空白 = 根；点分区框内空白 = 这个框。
-- **创建**：在哪层创建就属于哪层（工具栏、双击空白 / 框内、右键、树上 +）。新建表按所在层的命名空间补前缀 / schema。
-- **移动**：画布上把表 / 设计图 / 便签 / 分区框拖进或拖出分区框 = 剪切到那层（`items/move` → `moveItems`）；目标层命名空间不同时弹窗问"改名 / 保持原名"。树上拖拽同理（只做移动）。分区不能移到自己的子分区里。
+- **创建**：在哪层创建就属于哪层（工具栏、右键、树上 +）。新建表按所在层的命名空间补前缀 / schema。**不再支持双击画布空白或框内新建表**——双击分区框（标题或任意空白处）= 聚焦；双击设计图卡片 = 右侧 Mermaid 编辑。
+- **移动**：画布上把表 / 设计图 / 便签 / 分区框拖进或拖出分区框 = 剪切到那层（`items/move` → `moveItems`）；目标层命名空间不同时弹窗问"改名 / 保持原名"。树上拖拽同理（只做移动）。分区不能移到自己的子分区里。**拖入 / 拖出分区框的判定有 16px 迟滞带**（节点中心必须进入框内 16px 才算进入，离开外侧 16px 才算离开），避免在框边轻微抖动时反复切换放置目标；`dropTarget` 只更新高亮，不再触发整图重建。**分区框整体可拖动**（标题以外的空白区域也可以），方便拖大 / 拖空框。
+- **手动调整大小**：分区框未折叠时，右下角有调整大小手柄（与设计图卡片一致）。拖动时显示草稿尺寸，松开时 `partition.put` 写入 `width`/`height`；折叠时手柄隐藏。
 - **复制 / 剪切 / 粘贴**：树和画布都支持 `Ctrl+C / X / V` 与右键；剪贴板在主进程（`harness.clipboard` context key）。复制是深度复制：表按 `_copy`、`_copy2` 改名或换命名空间，副本内部外键指向副本；设计图复制文件并改 `refs`（Mermaid 代码不改写）；数据库表复制后粘贴成设计表（`clipboard.ts` 的 `dbSchemas/fromDb/relationOp`），剪切拒绝。粘贴到当前层（鼠标在层内 → 鼠标位置，否则 freeSpot）。
 - **命名空间**：`harness.partition.setNamespace`（树右键 / 面包屑 / 属性面板）。PostgreSQL、SQL Server、Redshift、Oracle 默认 schema，其他默认前缀；子分区不设置时继承。设置时可以选择把本层已有的表改名。画布上显示短名 + 灰色标签，同层短名冲突时回退显示真实名。
 - **删除分区画布**：连同子分区、设计表、设计图、便签、数据库表一起删除，删除前模态列出数量；编辑器打开时可 `Ctrl+Z`（设计图文件也会恢复）。
-- **自动布局**：`layoutLevel`（ELK 复合节点，`hierarchyHandling: INCLUDE_CHILDREN`，多层分区一起排）；只排选中的表时用 `layoutTables`。
+- **自动布局**：`layoutLevel`（ELK 复合节点，`hierarchyHandling: INCLUDE_CHILDREN`，多层分区一起排）；对无子内容的叶子分区使用 `PartitionView.width/height`（已包含手动值），不再硬编码 PART_MIN。只排选中的表时用 `layoutTables`。
 
 ### 5.7 添加数据库（连接页面）
 
@@ -355,7 +360,8 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | tbls 调用参数、超时 | `tbls/runner.ts` |
 | 存储格式、新文件类型、ID 分配 | `shared/workspace.ts`（类型）+ `workspace/storage.ts`（读写） |
 | 跨文件联动（改名/删除） | `workspace/refactor.ts` |
-| 分区画布、层级、跨层移动 | `shared/canvas.ts`（op）+ `canvasEditor.ts`（moveItems / deletePartition）+ `components/CanvasView.vue`（拖入拖出） |
+| 分区画布、层级、跨层移动 | `shared/canvas.ts`（op）+ `canvasEditor.ts`（moveItems / deletePartition）+ `components/CanvasView.vue`（拖入拖出 / 迟滞带 / dropTarget 高亮） |
+| 分区框手动大小 | `shared/canvas.ts`（`CanvasPartition.width/height`）+ `viewModel.ts buildView`（`max(手动, 内容包围盒)`）+ `layout.ts layoutLevel`（叶子节点使用 PartitionView 尺寸）+ `PartitionNode.vue`（`.resize` 手柄 emit resize）+ `CanvasView.vue`（resizePartition → `partition.put`） |
 | 复制 / 剪切 / 粘贴规则 | `shared/clipboard.ts` + `test/clipboard.test.ts`；主进程 `canvasEditor.ts paste/pasteItems`；树 `views/treeDragAndDrop.ts` |
 | 命名空间规则 | `shared/namespace.ts` + `test/clipboard.test.ts`；设置命令 `commands/canvas.ts setNamespace` |
 | 复制数据库表到设计 | `shared/copyTables.ts` + `test/copyTables.test.ts`；画布端 `canvasEditor.ts copyTablesToDesign` |
@@ -394,7 +400,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 | 文件 | 覆盖 |
 | :-- | :-- |
-| `test/canvas.test.ts` | 布局 v3 操作（nodes.put/display、hidden.set、move 换层、禁止移到自己的子分区、partition.put 的 ID 不复用、partition.remove 连同内容）、partitionPath、移除数据库、改表名、解析容错、序列化稳定性 |
+| `test/canvas.test.ts` | 布局 v3 操作（nodes.put/display、hidden.set、move 换层、禁止移到自己的子分区、partition.put 的 ID 不复用、partition.put 写入并 round width/height、partition.remove 连同内容）、partitionPath、移除数据库、改表名、解析容错、序列化稳定性 |
 | `test/clipboard.test.ts` | 命名空间（按库类型默认、前缀补 `_`、继承）；复制（`_copy` 命名、命名空间里保留短名、一起复制的外键指向副本、分区深度复制、禁止粘贴到自己的子分区）；剪切（默认不改名、命名空间改名、禁止移到自己的子分区） |
 | `test/copyTables.test.ts` | 数据库表复制到设计：字段/主键/唯一/注释/关系、重名跳过和改名、虚拟关系、空输入 |
 | `test/designOps.test.ts` | 设计编辑操作 |
@@ -418,7 +424,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 - 复制 ER 图时只改 `refs`，不改写 Mermaid 代码里的表名。
 - 缩小时简化显示（只显示表名）未做。
 - 聚焦时不淡化其他对象（只缩放视图），可在后续加"淡化其他内容"开关。
-- 修复文档 3 完成后尚未在真实 Cursor 环境中完整走查（typecheck、132 个单元测试、build 已通过）。
+- 修复文档 4（去双击创建表、分区手动调整大小、拖动迟滞消除闪烁）完成后尚未在真实 Cursor 环境中完整走查（typecheck、133 个单元测试、build 已通过）。
 
 ## 12. 相关文档
 
@@ -430,4 +436,4 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | `docs/tbls/tbls使用.md` | tbls 用法 |
 | `docs/step2initdev/01初始化/` | 阶段二：Vite HMR、工作区模型、侧边栏、画布、开发计划、实现记录 |
 | `docs/step2initdev/02新增设置/` | 自动命名（01）、连接页面（02）、tbls 能力分析（03）、开发计划（04） |
-| `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案、**第二阶段方案**（合并为设计画布、画布分区、数据库表复制）、**第二阶段修复文档**（树结构调整、显示全部表 toggle）、**第二阶段修复文档 2**（嵌套分区画布、命名空间、复制剪切、设计图卡片、面板折叠；第 5.12 节是实现与方案的偏差）、**第二阶段修复文档 3**（R1 去掉层级切换改为聚焦、R2 聚焦按钮、R3 右侧设计图编辑、R4 右侧面板增强、R5 收尾） |
+| `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案、**第二阶段方案**（合并为设计画布、画布分区、数据库表复制）、**第二阶段修复文档**（树结构调整、显示全部表 toggle）、**第二阶段修复文档 2**（嵌套分区画布、命名空间、复制剪切、设计图卡片、面板折叠；第 5.12 节是实现与方案的偏差）、**第二阶段修复文档 3**（R1 去掉层级切换改为聚焦、R2 聚焦按钮、R3 右侧设计图编辑、R4 右侧面板增强、R5 收尾）、**第二阶段修复文档 4**（去双击创建表、P2 分区框手动调整大小、P3 拖动边缘迟滞消除闪烁） |

@@ -334,20 +334,6 @@
       }
     ],
     "menus": {
-      "harness.design.newMenu": [
-        {
-          "command": "harness.design.createBlank",
-          "group": "1_new@1"
-        },
-        {
-          "command": "harness.design.createFromDb",
-          "group": "1_new@2"
-        },
-        {
-          "command": "harness.design.createFromFile",
-          "group": "1_new@3"
-        }
-      ],
       "view/title": [
         {
           "command": "harness.workspace.create",
@@ -428,7 +414,7 @@
         },
         {
           "submenu": "harness.design.newMenu",
-          "when": "view == harness.workspaces && viewItem == workspace",
+          "when": "view == harness.workspaces && (viewItem == workspace || viewItem == group.design)",
           "group": "1_new@1"
         },
         {
@@ -450,11 +436,6 @@
           "command": "harness.design.create",
           "when": "view == harness.workspaces && viewItem == group.design",
           "group": "inline"
-        },
-        {
-          "submenu": "harness.design.newMenu",
-          "when": "view == harness.workspaces && viewItem == group.design",
-          "group": "1_new@1"
         },
         {
           "command": "harness.db.create",
@@ -605,6 +586,20 @@
           "command": "harness.source.addToCanvas",
           "when": "view == harness.workspaces && viewItem == table.db",
           "group": "1_open@2"
+        }
+      ],
+      "harness.design.newMenu": [
+        {
+          "command": "harness.design.createBlank",
+          "group": "1_new@1"
+        },
+        {
+          "command": "harness.design.createFromDb",
+          "group": "1_new@2"
+        },
+        {
+          "command": "harness.design.createFromFile",
+          "group": "1_new@3"
         }
       ],
       "commandPalette": [

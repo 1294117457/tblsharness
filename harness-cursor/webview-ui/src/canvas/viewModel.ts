@@ -335,7 +335,12 @@ export function buildView(
       const s = sizes.get(child);
       if (s) grow(cp.x, cp.y, s.width, s.height);
     }
-    sizes.set(p.id, { width: Math.max(PART_MIN.width, right + PART_PAD), height: Math.max(PART_MIN.height, bottom + PART_PAD, PART_HEADER + PART_PAD) });
+    const contentWidth = Math.max(PART_MIN.width, right + PART_PAD);
+    const contentHeight = Math.max(PART_MIN.height, bottom + PART_PAD, PART_HEADER + PART_PAD);
+    sizes.set(p.id, {
+      width: Math.max(p.width ?? 0, contentWidth),
+      height: Math.max(p.height ?? 0, contentHeight),
+    });
   }
 
   const partitions: PartitionView[] = shownParts.map((sp) => {

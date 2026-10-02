@@ -47,15 +47,26 @@ export async function writeYaml(uri: vscode.Uri, value: unknown): Promise<void> 
 }
 
 export async function listDirectories(uri: vscode.Uri): Promise<string[]> {
-  if (!(await exists(uri))) return [];
+  const stat = await Promise.race([
+    fs.stat(uri).then((s) => ({ ok: true as const, s }), (e: unknown) => ({ ok: false as const, e })),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`stat(${uri.fsPath}) timed out after 5s`)), 5000)),
+  ]);
+  if (!stat.ok) return [];
+  // FileType is a bitfield; treat any directory bit as "is a directory".
+  if (!(stat.s.type & vscode.FileType.Directory)) return [];
   const entries = await fs.readDirectory(uri);
-  return entries.filter(([, type]) => type === vscode.FileType.Directory).map(([name]) => name).sort();
+  return entries.filter(([, type]) => type & vscode.FileType.Directory).map(([name]) => name).sort();
 }
 
 export async function listFiles(uri: vscode.Uri, suffix: string): Promise<string[]> {
-  if (!(await exists(uri))) return [];
+  const stat = await Promise.race([
+    fs.stat(uri).then((s) => ({ ok: true as const, s }), (e: unknown) => ({ ok: false as const, e })),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`stat(${uri.fsPath}) timed out after 5s`)), 5000)),
+  ]);
+  if (!stat.ok) return [];
+  if (!(stat.s.type & vscode.FileType.Directory)) return [];
   const entries = await fs.readDirectory(uri);
-  return entries.filter(([name, type]) => type === vscode.FileType.File && name.endsWith(suffix)).map(([name]) => name).sort();
+  return entries.filter(([name, type]) => (type & vscode.FileType.File) !== 0 && name.endsWith(suffix)).map(([name]) => name).sort();
 }
 
 export async function mkdirp(uri: vscode.Uri): Promise<void> {

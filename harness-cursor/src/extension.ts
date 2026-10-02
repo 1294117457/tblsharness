@@ -16,7 +16,9 @@ import { WorkspaceTreeProvider } from './views/workspaceTree';
 import { HarnessStorage } from './workspace/storage';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  console.log('[harness.activate] start, globalStorageUri=', context.globalStorageUri.fsPath);
   const storage = new HarnessStorage(context);
+  console.log('[harness.activate] workspacesDir=', storage.workspacesDir.fsPath);
   const store = new ModelStore(storage, context.secrets);
   const tree = new WorkspaceTreeProvider(storage, store, context.secrets, context.extensionUri);
   const diagrams = new DiagramService(storage, store);
@@ -29,6 +31,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     canSelectMany: true,
     dragAndDropController: new TreeDragAndDrop(canvases),
   });
+  console.log('[harness.activate] treeView created');
   const h = { context, storage, store, tree, treeView, canvases, diagrams } as Harness;
   h.connections = new ConnectionPanels(h);
   h.editors = new EditPanels(h);
@@ -48,6 +51,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerDiagramCommands(h);
   registerDbCommands(h);
   registerCanvasCommands(h);
+  console.log('[harness.activate] commands registered');
 
   const watcher = new StorageWatcher(storage, store);
   context.subscriptions.push(
@@ -60,7 +64,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
   );
-  await watcher.start();
+  // Don't block activation on storage IO: a hung watcher would freeze the whole extension host.
+  watcher.start().catch((err) => console.error('[harness.storage] watcher.start failed:', err));
+  console.log('[harness.activate] done');
 }
 
 export function deactivate(): void {}

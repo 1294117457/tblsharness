@@ -5,6 +5,7 @@
       "name": "Run Extension (Webview HMR)",
       "type": "extensionHost",
       "request": "launch",
+      "stopOnEntry": false,
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "env": { "HARNESS_WEBVIEW_DEV_URL": "http://localhost:5173" },
@@ -14,6 +15,7 @@
       "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
+      "stopOnEntry": false,
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "build"

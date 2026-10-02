@@ -1,19 +1,52 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import type { PartitionView } from '../canvas/viewModel';
-import { PART_HEADER } from '../canvas/layout';
+import { PART_HEADER, PART_MIN } from '../canvas/layout';
 
-defineProps<{ data: PartitionView; selected?: boolean; current?: boolean; dropTarget?: boolean }>();
+const props = defineProps<{ data: PartitionView; selected?: boolean; current?: boolean; dropTarget?: boolean }>();
 const emit = defineEmits<{
   focus: [id: string];
   toggle: [id: string];
+  resize: [payload: { id: string; width: number; height: number }];
 }>();
+
+const draft = ref<{ width: number; height: number }>();
+let start = { x: 0, y: 0, width: 0, height: 0, zoom: 1 };
+
+function onResizeStart(e: PointerEvent) {
+  e.stopPropagation();
+  e.preventDefault();
+  const el = (e.currentTarget as HTMLElement).parentElement!;
+  const zoom = el.getBoundingClientRect().width / props.data.width || 1;
+  start = { x: e.clientX, y: e.clientY, width: props.data.width, height: props.data.height, zoom };
+  draft.value = { width: props.data.width, height: props.data.height };
+  document.addEventListener('pointermove', onResizeMove);
+  document.addEventListener('pointerup', onResizeEnd);
+}
+
+function onResizeMove(e: PointerEvent) {
+  draft.value = {
+    width: Math.max(PART_MIN.width, start.width + (e.clientX - start.x) / start.zoom),
+    height: Math.max(PART_MIN.height, start.height + (e.clientY - start.y) / start.zoom),
+  };
+}
+
+function onResizeEnd() {
+  document.removeEventListener('pointermove', onResizeMove);
+  document.removeEventListener('pointerup', onResizeEnd);
+  const d = draft.value;
+  draft.value = undefined;
+  if (d && (Math.round(d.width) !== props.data.width || Math.round(d.height) !== props.data.height)) {
+    emit('resize', { id: props.data.id, width: Math.round(d.width), height: Math.round(d.height) });
+  }
+}
 </script>
 
 <template>
   <div
     class="partition"
     :class="{ selected, current, collapsed: data.collapsed, 'drop-target': dropTarget, [`depth-${Math.min(data.depth, 4)}`]: true }"
-    :style="{ width: `${data.width}px`, height: `${data.height}px` }"
+    :style="{ width: `${draft?.width ?? data.width}px`, height: `${draft?.height ?? data.height}px` }"
   >
     <div class="header" :style="{ height: `${PART_HEADER}px` }" :title="data.description ? `${data.name}\n${data.description}` : `${data.name}（双击标题聚焦）`">
       <button class="twisty nodrag" :title="data.collapsed ? '展开' : '折叠'" @click.stop="emit('toggle', data.id)" @dblclick.stop>{{ data.collapsed ? '▸' : '▾' }}</button>
@@ -22,6 +55,7 @@ const emit = defineEmits<{
       <span class="counts">{{ data.counts.tables }} 表 · {{ data.counts.diagrams }} 图<template v-if="data.counts.partitions"> · {{ data.counts.partitions }} 分区</template></span>
       <button class="focus nodrag" title="聚焦：缩放视图到这个分区画布（F）" @click.stop="emit('focus', data.id)" @dblclick.stop>⤢</button>
     </div>
+    <div v-if="!data.collapsed" class="resize nodrag" title="拖动调整大小" @pointerdown="onResizeStart" />
   </div>
 </template>
 
@@ -118,5 +152,20 @@ const emit = defineEmits<{
   color: var(--hn-muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  cursor: se-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--hn-muted) 50%);
+  opacity: 0.4;
+}
+
+.partition:hover .resize {
+  opacity: 0.8;
 }
 </style>

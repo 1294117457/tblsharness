@@ -64,7 +64,7 @@ export async function layoutLevel(view: CanvasView, within?: string): Promise<Ma
     const kids = childrenOf.get(p.id);
     const node: ElkNode =
       p.collapsed || !kids?.length
-        ? { id: `part:${p.id}`, width: p.collapsed ? PART_COLLAPSED.width : PART_MIN.width, height: p.collapsed ? PART_COLLAPSED.height : PART_MIN.height }
+        ? { id: `part:${p.id}`, width: p.collapsed ? PART_COLLAPSED.width : p.width, height: p.collapsed ? PART_COLLAPSED.height : p.height }
         : {
             id: `part:${p.id}`,
             layoutOptions: { ...LAYOUT_OPTIONS, 'elk.padding': `[top=${PART_HEADER + PART_PAD / 2},left=${PART_PAD},bottom=${PART_PAD},right=${PART_PAD}]` },

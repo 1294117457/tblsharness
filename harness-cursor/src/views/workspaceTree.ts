@@ -20,6 +20,7 @@ const DRIVER_ICONS = new Set<ConnectionDriver>(['postgres', 'mysql', 'mariadb', 
  * Every level shows the same three groups: 设计表, 设计图, 分区画布.
  */
 export type TreeNode =
+  | { kind: 'empty'; workspace: '' }
   | { kind: 'workspace'; workspace: string }
   | { kind: 'group'; workspace: string; group: Group }
   | { kind: 'placeholder'; workspace: string; group: Group }
@@ -136,6 +137,23 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
   }
 
   async getTreeItem(node: TreeNode): Promise<vscode.TreeItem> {
+    try {
+      return await this.getTreeItemInner(node);
+    } catch (err) {
+      console.error('[harness.tree] getTreeItem failed:', err);
+      throw err;
+    }
+  }
+
+  private async getTreeItemInner(node: TreeNode): Promise<vscode.TreeItem> {
+    if (node.kind === 'empty') {
+      const item = new vscode.TreeItem('还没有工作区，点击新建', vscode.TreeItemCollapsibleState.None);
+      item.id = 'empty';
+      item.iconPath = new vscode.ThemeIcon('add');
+      item.contextValue = 'empty';
+      item.command = { command: 'harness.workspace.create', title: '新建工作区' };
+      return item;
+    }
     const ws = this.storage.workspace(node.workspace);
     switch (node.kind) {
       case 'workspace': {
@@ -283,8 +301,23 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
   }
 
   async getChildren(node?: TreeNode): Promise<TreeNode[]> {
+    console.log('[harness.tree] getChildren called, node=', node);
+    try {
+      return await this.getChildrenInner(node);
+    } catch (err) {
+      console.error('[harness.tree] getChildren failed:', err);
+      throw err;
+    }
+  }
+
+  private async getChildrenInner(node?: TreeNode): Promise<TreeNode[]> {
     if (!node) {
       const workspaces = await this.storage.listWorkspaces();
+      console.log('[harness.tree] getChildren root ->', workspaces.length, 'workspaces');
+      if (!workspaces.length) {
+        // Cursor ignores package.json `viewsWelcome` in many cases; show an actionable placeholder instead of nothing.
+        return [{ kind: 'empty', workspace: '' }];
+      }
       const named = await Promise.all(workspaces.map(async (w) => ({ id: w.id, name: (await w.readMeta()).name })));
       return named.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true })).map((w) => ({ kind: 'workspace', workspace: w.id }));
     }

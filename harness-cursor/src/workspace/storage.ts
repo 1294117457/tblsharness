@@ -63,8 +63,13 @@ export class HarnessStorage {
   }
 
   async listWorkspaces(): Promise<HarnessWorkspace[]> {
-    const ids = await listDirectories(this.workspacesDir);
-    return ids.map((id) => this.workspace(id));
+    try {
+      const ids = await listDirectories(this.workspacesDir);
+      return ids.map((id) => this.workspace(id));
+    } catch (err) {
+      console.error('[harness.storage] listWorkspaces failed:', err);
+      return [];
+    }
   }
 
   async workspaceIds(): Promise<string[]> {

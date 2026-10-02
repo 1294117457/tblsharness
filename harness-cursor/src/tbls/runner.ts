@@ -87,7 +87,7 @@ function run(options: TblsOutOptions): Promise<{ stdout: string; stderr: string 
         if (err) {
           const e = err as NodeJS.ErrnoException & { killed?: boolean };
           if (e.code === 'ENOENT') {
-            reject(new TblsError(`找不到 tbls 可执行文件：${file}。请在设置 harness.tblsPath 中配置 tbls 的完整路径。`, 'notFound'));
+            reject(new TblsError(`找不到 tbls 可执行文件：${file}。可以打开设置把 harness.tblsPath 指向本地 tbls，或清空它让 Harness 自动下载内置版本。`, 'notFound'));
           } else if (e.name === 'AbortError' || options.signal?.aborted) {
             reject(new TblsError('已取消', 'cancelled'));
           } else if (e.killed && options.timeoutMs) {

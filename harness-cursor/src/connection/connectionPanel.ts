@@ -13,14 +13,17 @@ import {
   type ConnectionDriver,
   type ConnectionProfile,
 } from '../shared/connection';
-import type { ConnectionFilters, ConnectionHostMessage, ConnectionResult, ConnectionWebviewMessage } from '../shared/connectionProtocol';
+import type { ConnectionFilters, ConnectionHostMessage, ConnectionResult, ConnectionWebviewMessage, TblsStatus } from '../shared/connectionProtocol';
 import type { TblsSchema } from '../shared/tbls';
 import { DEFAULT_DB_EXCLUDE, DEFAULT_SNAPSHOT_RETENTION, type DbSourceMeta } from '../shared/workspace';
 import { maskSecret, parseTblsJson, TblsError, tblsOutJson } from '../tbls/runner';
 import { readText } from '../workspace/fsUtil';
 import type { DbSource, HarnessWorkspace } from '../workspace/storage';
 import { renderWebviewHtml, webviewOptions } from '../webview/html';
-import { friendlyTblsError } from './errors';
+import { friendlyMissingTblsError, friendlyTblsError } from './errors';
+import { resolveTblsPath, TblsResolveError } from '../tbls/resolver';
+import { install, probe } from '../tbls/manager';
+import { resolveBaseUrl } from '../tbls/releases';
 
 const LAST_DRIVER_KEY = 'harness.lastConnectionDriver';
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -124,6 +127,15 @@ class ConnectionPanel implements vscode.Disposable {
         return this.reply(msg.requestId, () => this.importFile());
       case 'pickFile':
         return this.pickFile(msg.requestId, msg.purpose);
+      case 'pickTblsPath':
+        return this.handlePickTblsPath(msg.requestId);
+      case 'testTbls':
+        return this.handleTestTbls(msg.requestId);
+      case 'installTbls':
+        return this.handleInstallTbls(msg.requestId);
+      case 'openTblsReleases':
+        if (/^https:\/\//.test(msg.url)) await vscode.env.openExternal(vscode.Uri.parse(msg.url));
+        return;
       case 'openUrl':
         if (/^https:\/\//.test(msg.url)) await vscode.env.openExternal(vscode.Uri.parse(msg.url));
         return;
@@ -141,6 +153,7 @@ class ConnectionPanel implements vscode.Disposable {
 
   private async sendInit(): Promise<void> {
     const wsMeta = await this.ws.readMeta();
+    const tblsStatus = await this.buildTblsStatus();
     if (!this.db) {
       const last = this.h.context.globalState.get<ConnectionDriver>(LAST_DRIVER_KEY);
       this.post({
@@ -150,6 +163,7 @@ class ConnectionPanel implements vscode.Disposable {
         driver: last && driverInfo(last).id === last ? last : 'postgres',
         hasSavedPassword: false,
         filters: { exclude: [...DEFAULT_DB_EXCLUDE], include: [] },
+        tblsStatus,
       });
       return;
     }
@@ -171,7 +185,27 @@ class ConnectionPanel implements vscode.Disposable {
       hasSavedPassword: hasSecret,
       defaultSchema: meta.defaultSchema,
       filters: { exclude: meta.exclude, include: meta.include },
+      tblsStatus,
     });
+  }
+
+  private async buildTblsStatus(): Promise<TblsStatus> {
+    const config = vscode.workspace.getConfiguration('harness');
+    const configuredPath = (config.get<string>('harness.tblsPath', '') || '').trim();
+    const bundledVersion = (config.get<string>('harness.tblsVersion', '') || this.h.context.extension.packageJSON.version).replace(/^v/, '');
+    const installed = await probe(this.h.context, bundledVersion);
+    if (configuredPath) {
+      return {
+        source: 'user-configured',
+        bundledVersion,
+        installedVersion: installed ? bundledVersion : undefined,
+        resolvedPath: configuredPath,
+      };
+    }
+    if (installed) {
+      return { source: 'bundled', bundledVersion, installedVersion: bundledVersion, resolvedPath: installed.fsPath };
+    }
+    return { source: 'missing', bundledVersion };
   }
 
   /** In edit mode an empty password (or DSN) means "keep the saved one"; the page never receives it. */
@@ -221,7 +255,11 @@ class ConnectionPanel implements vscode.Disposable {
     const started = Date.now();
     try {
       const result = await tblsOutJson({
-        tblsPath: config.get<string>('tblsPath', 'tbls') || 'tbls',
+        tblsPath: await resolveTblsPath(
+          this.h.context,
+          config.get<string>('tblsPath', 'tbls') || 'tbls',
+          { extensionVersion: this.h.context.extension.packageJSON.version as string },
+        ),
         dsn: buildDsn(profile),
         configPath: await this.configPath(),
         exclude: filters.exclude,
@@ -364,7 +402,9 @@ class ConnectionPanel implements vscode.Disposable {
     try {
       result = await run();
     } catch (err) {
-      if (err instanceof TblsError) {
+      if (err instanceof TblsResolveError) {
+        result = { ok: false, ...friendlyMissingTblsError(err) };
+      } else if (err instanceof TblsError) {
         result = { ok: false, ...friendlyTblsError(err.message, err.reason) };
       } else if (err instanceof UserError) {
         result = { ok: false, message: err.message };
@@ -373,6 +413,48 @@ class ConnectionPanel implements vscode.Disposable {
       }
     }
     this.post({ type: 'result', requestId, ...result });
+  }
+
+  private async handlePickTblsPath(requestId: string): Promise<void> {
+    const [file] = (await vscode.window.showOpenDialog({
+      title: '选择 tbls 可执行文件',
+      canSelectMany: false,
+      filters: { '所有文件': ['*'] },
+    })) ?? [];
+    if (!file) {
+      this.post({ type: 'tblsPathPicked', requestId });
+      return;
+    }
+    await vscode.workspace.getConfiguration('harness').update('tblsPath', file.fsPath, vscode.ConfigurationTarget.Global);
+    this.post({ type: 'tblsPathPicked', requestId, path: file.fsPath });
+  }
+
+  private async handleTestTbls(requestId: string): Promise<void> {
+    try {
+      const path = await resolveTblsPath(this.h.context, undefined, { extensionVersion: this.h.context.extension.packageJSON.version as string });
+      const { execFile } = await import('node:child_process');
+      const version = await new Promise<string>((resolve, reject) => {
+        execFile(path, ['--version'], { timeout: 10_000, windowsHide: true }, (err, stdout) => {
+          if (err) reject(err);
+          else resolve(String(stdout).trim());
+        });
+      });
+      this.post({ type: 'tblsTested', requestId, ok: true, version });
+    } catch (err) {
+      this.post({ type: 'tblsTested', requestId, ok: false, error: (err as Error).message });
+    }
+  }
+
+  private async handleInstallTbls(requestId: string): Promise<void> {
+    try {
+      const config = vscode.workspace.getConfiguration('harness');
+      const version = (config.get<string>('harness.tblsVersion', '') || this.h.context.extension.packageJSON.version).replace(/^v/, '');
+      const baseUrl = resolveBaseUrl(config);
+      const installed = await install(this.h.context, version, baseUrl);
+      this.post({ type: 'tblsInstalled', requestId, ok: true, path: installed.fsPath });
+    } catch (err) {
+      this.post({ type: 'tblsInstalled', requestId, ok: false, error: (err as Error).message });
+    }
   }
 
   dispose(): void {

@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import { friendlyTblsError } from '../connection/errors';
+import { friendlyMissingTblsError, friendlyTblsError } from '../connection/errors';
 import { buildDsn, describeProfile, parseStoredConnection, secretsOf, serializeConnection } from '../shared/connection';
 import { maskSecret, parseTblsJson, stripDsnFromTblsConfig, TblsError, tblsOutJson } from '../tbls/runner';
+import { resolveTblsPath, TblsResolveError } from '../tbls/resolver';
 import { readText, writeText } from '../workspace/fsUtil';
 import { deleteDbFromDesigns, designNamesReferencingDb } from '../workspace/refactor';
 import type { DbSource } from '../workspace/storage';
@@ -33,7 +34,11 @@ export function registerDbCommands(h: Harness): void {
     const secrets = secretsOf(profile);
     const errorKey = `${db.workspace.id}/${db.id}`;
     const config = vscode.workspace.getConfiguration('harness');
-    const tblsPath = config.get<string>('tblsPath', 'tbls') || 'tbls';
+    const tblsPath = await resolveTblsPath(
+      h.context,
+      config.get<string>('tblsPath', 'tbls') || 'tbls',
+      { extensionVersion: h.context.extension.packageJSON.version as string },
+    );
     const timeoutMs = Math.max(5, config.get<number>('tblsTimeoutSeconds', 120)) * 1000;
     const configPath = (await db.hasTblsConfig()) ? db.tblsConfigFile.fsPath : undefined;
     await vscode.workspace.fs.createDirectory(db.snapshotsDir);
@@ -53,12 +58,24 @@ export function registerDbCommands(h: Harness): void {
     } catch (err) {
       if (err instanceof TblsError && err.reason === 'cancelled') return;
       const raw = maskSecret((err as Error).message, dsn, secrets);
-      const friendly = err instanceof TblsError ? friendlyTblsError(raw, err.reason) : { message: raw };
+      const friendly =
+        err instanceof TblsResolveError
+          ? friendlyMissingTblsError(err)
+          : err instanceof TblsError
+          ? friendlyTblsError(raw, err.reason)
+          : { message: raw };
       h.tree.syncErrors.set(errorKey, friendly.detail ? `${friendly.message}\n${friendly.detail}` : friendly.message);
       h.tree.refresh();
-      const actions = friendly.action === 'setTblsPath' ? ['设置 tbls 路径'] : ['编辑连接…'];
+      const actions =
+        friendly.action === 'setTblsPath'
+          ? ['设置 tbls 路径']
+          : friendly.action === 'downloadTbls'
+          ? ['下载 tbls', '设置 tbls 路径', '查看 Releases…']
+          : ['编辑连接…'];
       const pick = await vscode.window.showErrorMessage(`Harness：同步“${name}”失败：${friendly.message}`, { detail: friendly.detail }, ...actions);
       if (pick === '设置 tbls 路径') await vscode.commands.executeCommand('workbench.action.openSettings', 'harness.tblsPath');
+      if (pick === '下载 tbls') await vscode.commands.executeCommand('harness.tbls.repair');
+      if (pick === '查看 Releases…') await vscode.env.openExternal(vscode.Uri.parse('https://github.com/k1LoW/tbls/releases'));
       if (pick === '编辑连接…') h.connections.openEdit(db);
     }
   });

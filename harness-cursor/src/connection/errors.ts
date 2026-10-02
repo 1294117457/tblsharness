@@ -1,8 +1,10 @@
+import type { TblsResolveError } from '../tbls/resolver';
+
 export interface FriendlyError {
   message: string;
   /** The original (already masked) tbls output, shown under "详细信息". */
   detail?: string;
-  action?: 'setTblsPath';
+  action?: 'setTblsPath' | 'downloadTbls';
 }
 
 const RULES: { match: RegExp; message: string }[] = [
@@ -32,4 +34,24 @@ export function friendlyTblsError(raw: string, reason?: 'notFound' | 'timeout' |
   if (reason === 'timeout') return { message: raw };
   const rule = RULES.find((r) => r.match.test(raw));
   return rule ? { message: rule.message, detail: raw } : { message: raw };
+}
+
+/**
+ * Builds an error explaining that the bundled tbls binary is missing.
+ *
+ *  - `error.reason === 'missing-bundled'` → the bundled version isn't installed yet (action: downloadTbls)
+ *  - `error.reason === 'download-failed'` → the bundled install failed (action: downloadTbls)
+ */
+export function friendlyMissingTblsError(error: TblsResolveError): FriendlyError {
+  if (error.reason === 'download-failed') {
+    return {
+      message: `Harness 内置的 tbls 下载失败：${error.message}`,
+      detail: error.stack,
+      action: 'downloadTbls',
+    };
+  }
+  return {
+    message: 'Harness 还没有内置的 tbls。可以在设置里打开自动下载，或者手动指定一个本地的 tbls。',
+    action: 'downloadTbls',
+  };
 }

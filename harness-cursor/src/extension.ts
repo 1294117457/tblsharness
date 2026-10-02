@@ -5,12 +5,14 @@ import type { Harness } from './commands/common';
 import { registerDbCommands } from './commands/db';
 import { registerDesignCommands } from './commands/design';
 import { registerDiagramCommands } from './commands/diagram';
+import { registerTblsCommands } from './commands/tbls';
 import { DiagramEditorProvider } from './diagram/diagramEditor';
 import { DiagramService } from './diagram/diagramService';
 import { registerWorkspaceCommands } from './commands/workspace';
 import { ConnectionPanels } from './connection/connectionPanel';
 import { EditPanels } from './edit/editPanel';
 import { ModelStore } from './model/store';
+import { ensureTbls } from './tbls/ensure';
 import { TreeDragAndDrop } from './views/treeDragAndDrop';
 import { WorkspaceTreeProvider } from './views/workspaceTree';
 import { HarnessStorage } from './workspace/storage';
@@ -50,6 +52,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerDesignCommands(h);
   registerDiagramCommands(h);
   registerDbCommands(h);
+  registerTblsCommands(h);
   registerCanvasCommands(h);
   console.log('[harness.activate] commands registered');
 
@@ -66,6 +69,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   // Don't block activation on storage IO: a hung watcher would freeze the whole extension host.
   watcher.start().catch((err) => console.error('[harness.storage] watcher.start failed:', err));
+  // Don't block activation on the tbls download either: it can be slow (or fail if offline).
+  ensureTbls(context).catch((err) => console.error('[harness.tbls] ensureTbls failed:', err));
   console.log('[harness.activate] done');
 }
 

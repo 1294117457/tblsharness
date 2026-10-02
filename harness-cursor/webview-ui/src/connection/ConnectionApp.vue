@@ -14,7 +14,7 @@ import {
 import type { ConnectionInit, ConnectionResult } from '@shared/connectionProtocol';
 import DriverFields from './DriverFields.vue';
 import { lines, toProfile, type ConnectionForm } from './form';
-import { onInit, pickFile, run, send } from './host';
+import { installTbls, onInit, pickFile, pickTblsPath, run, send, testTbls } from './host';
 
 const DRIVER_ICONS: Record<ConnectionDriver, string> = {
   postgres: '🐘',
@@ -52,6 +52,10 @@ const busy = ref<'test' | 'connect' | 'import'>();
 const result = ref<{ res: ConnectionResult; signature: string; kind: 'test' | 'connect' }>();
 const detailOpen = ref(false);
 const imported = ref<{ path: string; name?: string; tables?: number; error?: string }>();
+const tblsTesting = ref(false);
+const tblsTest = ref<{ ok: boolean; version?: string; error?: string } | undefined>();
+const tblsInstalling = ref(false);
+const tblsPathPicker = ref(false);
 
 const editing = computed(() => init.value?.mode === 'edit');
 const info = computed(() => driverInfo(form.driver));
@@ -166,6 +170,45 @@ function seconds(ms: number): string {
 function setTblsPath() {
   send({ type: 'openTblsSettings' });
 }
+
+async function chooseTblsPath() {
+  if (busy.value || tblsPathPicker.value) return;
+  tblsPathPicker.value = true;
+  try {
+    await pickTblsPath();
+    send({ type: 'ready' });
+  } finally {
+    tblsPathPicker.value = false;
+  }
+}
+
+async function verifyTbls() {
+  if (busy.value || tblsTesting.value) return;
+  tblsTesting.value = true;
+  tblsTest.value = undefined;
+  try {
+    tblsTest.value = await testTbls();
+  } finally {
+    tblsTesting.value = false;
+  }
+}
+
+async function downloadTbls() {
+  if (busy.value || tblsInstalling.value) return;
+  tblsInstalling.value = true;
+  tblsTest.value = undefined;
+  try {
+    const res = await installTbls();
+    if (res.ok) {
+      tblsTest.value = { ok: true, version: `已安装到 ${res.path ?? ''}`.trim() };
+    } else {
+      tblsTest.value = { ok: false, error: res.error ?? '下载失败' };
+    }
+    send({ type: 'ready' });
+  } finally {
+    tblsInstalling.value = false;
+  }
+}
 </script>
 
 <template>
@@ -228,6 +271,34 @@ function setTblsPath() {
           </div>
         </div>
 
+        <div class="tbls-status">
+          <div class="tbls-row">
+            <span class="label">tbls</span>
+            <div class="tbls-info">
+              <template v-if="init.tblsStatus.source === 'bundled'">
+                <span class="ok">✔ 内置 v{{ init.tblsStatus.bundledVersion }}</span>
+                <span class="muted path" :title="init.tblsStatus.resolvedPath">{{ init.tblsStatus.resolvedPath }}</span>
+              </template>
+              <template v-else-if="init.tblsStatus.source === 'user-configured'">
+                <span class="warn">⚠ 使用本地 tbls</span>
+                <span class="muted path" :title="init.tblsStatus.resolvedPath">{{ init.tblsStatus.resolvedPath }}</span>
+              </template>
+              <template v-else>
+                <span class="field-error">✖ 还没有内置 tbls（v{{ init.tblsStatus.bundledVersion }}）</span>
+              </template>
+            </div>
+          </div>
+          <div class="tbls-actions">
+            <button type="button" class="secondary small" @click="downloadTbls" :disabled="!!busy || tblsInstalling">下载内置 tbls</button>
+            <button type="button" class="secondary small" @click="chooseTblsPath" :disabled="!!busy || tblsPathPicker">选择本地文件…</button>
+            <button type="button" class="secondary small" @click="verifyTbls" :disabled="!!busy || tblsTesting">{{ tblsTesting ? '正在测试…' : '测试' }}</button>
+          </div>
+          <p v-if="tblsTest" class="tbls-info-text" :class="{ ok: tblsTest.ok, 'field-error': !tblsTest.ok }">
+            <template v-if="tblsTest.ok">✔ {{ tblsTest.version || '可执行' }}</template>
+            <template v-else>✖ {{ tblsTest.error }}</template>
+          </p>
+        </div>
+
         <p class="muted hint">ⓘ 建议使用只读账号。连接信息（主机、用户名、密码）只保存在系统凭据中，不会写入任何文件。Harness 只读取表结构，不读取表里的数据。</p>
       </template>
 
@@ -256,6 +327,7 @@ function setTblsPath() {
         <template v-else>
           <span class="field-error">✖ {{ result.res.message }}</span>
           <button v-if="result.res.action === 'setTblsPath'" type="button" class="secondary small" @click="setTblsPath">设置 tbls 路径</button>
+          <button v-else-if="result.res.action === 'downloadTbls'" type="button" class="secondary small" @click="downloadTbls">下载 tbls</button>
           <details v-if="result.res.detail" :open="detailOpen" class="detail" @toggle="detailOpen = ($event.target as HTMLDetailsElement).open">
             <summary>详细信息</summary>
             <pre>{{ result.res.detail }}</pre>
@@ -413,6 +485,46 @@ h1 .muted {
 .display-name {
   padding-top: 4px;
   word-break: break-all;
+}
+
+.tbls-status {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--hn-accent);
+  background: var(--hn-node-bg);
+}
+
+.tbls-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px 12px;
+  align-items: baseline;
+}
+
+.tbls-info {
+  min-width: 0;
+}
+
+.path {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
+
+.tbls-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.tbls-info-text {
+  margin: 6px 0 0;
+  font-size: 12px;
 }
 
 .hint {

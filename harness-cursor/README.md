@@ -33,8 +33,14 @@
 
 | 设置 | 作用 |
 | :-- | :-- |
-| `harness.tblsPath` | tbls 可执行文件的路径。已经在 PATH 里时不用填 |
+| `harness.tblsPath` | tbls 可执行文件。空着就使用 Harness 自动下载的内置 tbls；填绝对路径或 PATH 中的命令名（`tbls`）就用本地版本 |
+| `harness.tblsVersion` | 内置 tbls 的目标版本（带不带 `v` 都行）。空着 = 扩展自带的版本。仅在 `harness.tblsPath` 为空时生效 |
+| `harness.tblsDownloadBaseUrl` | 内置 tbls 的 release 页地址，默认 `https://github.com/k1LoW/tbls/releases`。需要用 fork 或镜像时改这里 |
+| `harness.tblsAutoDownload` | 是否在首次使用时自动下载缺失的内置 tbls。关掉后只能手动 `Harness: 下载并修复内置 tbls` 命令 |
 | `harness.storageDir` | 工作区的存放目录。不填时使用插件的全局存储目录；可以改成网盘或单独的 Git 仓库来备份、共享 |
+| `harness.tblsTimeoutSeconds` | 读取数据库结构（tbls）的最长时间，超过后停止 |
+
+> 第一次使用「添加数据库」时，Harness 会自动从 GitHub Releases 下载与你的平台匹配的 tbls 二进制到 `<globalStorage>/bin/`。下载失败时连接页面会显示三个按钮：重新下载、手动选择本地 tbls、打开 GitHub Releases。命令面板里也有 `Harness: 检查 tbls 更新` / `Harness: 下载并修复内置 tbls` / `Harness: 打开内置 tbls 文件夹`。
 
 ## 开发
 
@@ -96,7 +102,14 @@ src/
 ├─ views/workspaceTree.ts       # 侧边栏树视图
 ├─ commands/                    # 各类命令
 ├─ webview/html.ts              # Webview HTML（生产模式 / Vite 开发模式）
-└─ tbls/runner.ts               # 调用 tbls（报错信息里会遮掉密码）
+├─ tbls/
+│  ├─ runner.ts               # 调用 tbls（报错信息里会遮掉密码）
+│  ├─ resolver.ts             # 解析 tbls 路径：用户覆盖 > 内置下载；throw TblsResolveError
+│  ├─ manager.ts              # install/probe/verify/readCurrent，下载 + sha256 + 解压到 <globalStorage>/bin/
+│  ├─ ensure.ts               # activate 时非阻塞自动下载缺失的内置 tbls
+│  ├─ releases.ts             # resolveBaseUrl / resolveVersion
+│  └─ shared/tblsPlatform.ts  # pickAsset / binaryFilename / binDirName（纯函数）
+├─ commands/tbls.ts           # harness.tbls.checkUpdate / repair / openFolder
 webview-ui/src/                 # Vue 3 + Vue Flow + elkjs + mermaid
 test/                           # 单元测试
 ```

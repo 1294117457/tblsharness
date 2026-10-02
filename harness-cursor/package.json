@@ -8,12 +8,18 @@
   "engines": {
     "vscode": "^1.90.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://example.com/harness/harness-cursor.git"
+  },
   "categories": [
     "Visualization",
     "Other"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "*"
+  ],
   "contributes": {
     "commands": [
       {
@@ -202,6 +208,24 @@
         "command": "harness.db.delete",
         "title": "删除数据库",
         "category": "Harness"
+      },
+      {
+        "command": "harness.tbls.checkUpdate",
+        "title": "检查 tbls 更新",
+        "category": "Harness",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "harness.tbls.repair",
+        "title": "下载并修复内置 tbls",
+        "category": "Harness",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "harness.tbls.openFolder",
+        "title": "打开内置 tbls 文件夹",
+        "category": "Harness",
+        "icon": "$(folder-opened)"
       },
       {
         "command": "harness.partition.open",
@@ -658,8 +682,23 @@
       "properties": {
         "harness.tblsPath": {
           "type": "string",
-          "default": "tbls",
-          "description": "tbls 可执行文件路径。tbls 在 PATH 里时保持默认值即可。"
+          "default": "",
+          "description": "tbls 可执行文件路径。留空时使用 Harness 内置的 tbls；可以填 PATH 里的命令名（如 `tbls`），也可以填绝对路径。"
+        },
+        "harness.tblsDownloadBaseUrl": {
+          "type": "string",
+          "default": "https://github.com/k1LoW/tbls/releases",
+          "description": "下载内置 tbls 时的基地址。仅在 `harness.tblsPath` 留空时生效。"
+        },
+        "harness.tblsVersion": {
+          "type": "string",
+          "default": "",
+          "description": "内置 tbls 的版本（带不带 `v` 都可以）。留空时使用扩展的版本号。仅在 `harness.tblsPath` 留空时生效。"
+        },
+        "harness.tblsAutoDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "首次使用时是否自动下载并使用内置的 tbls。关闭后只在你显式选择“下载 tbls”时下载。"
         },
         "harness.storageDir": {
           "type": "string",
@@ -694,11 +733,13 @@
     "@vue-flow/core": "^1.48.2",
     "elkjs": "^0.12.0",
     "mermaid": "^12.0.0",
+    "tar": "^7.5.22",
     "vue": "^3.5.43",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
+    "@types/tar": "^6.1.13",
     "@types/vscode": "^1.90.0",
     "@vitejs/plugin-vue": "^6.0.9",
     "@vscode/vsce": "^4.0.0",

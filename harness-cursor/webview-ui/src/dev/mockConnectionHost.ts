@@ -34,6 +34,7 @@ function handle(msg: ConnectionWebviewMessage) {
         driver: 'postgres',
         hasSavedPassword: false,
         filters: { exclude: ['pg_stat_statements', 'pgmq.*'], include: [] },
+        tblsStatus: { source: 'bundled', bundledVersion: '1.86.0', installedVersion: '1.86.0', resolvedPath: 'C:\\Users\\demo\\.cursor\\extensions\\harness.harness\\globalStorage\\bin\\tbls.exe' },
       });
       return;
     case 'test':
@@ -58,6 +59,15 @@ function handle(msg: ConnectionWebviewMessage) {
           ? { type: 'filePicked', requestId: msg.requestId, path: 'C:\\data\\app.db' }
           : { type: 'filePicked', requestId: msg.requestId, path: 'C:\\exports\\shop.json', name: 'shop', tables: 42 },
       );
+      return;
+    case 'pickTblsPath':
+      send({ type: 'tblsPathPicked', requestId: msg.requestId, path: 'C:\\Program Files\\tbls\\tbls.exe' });
+      return;
+    case 'testTbls':
+      send({ type: 'tblsTested', requestId: msg.requestId, ok: true, version: 'tbls version 1.6.0' });
+      return;
+    case 'installTbls':
+      send({ type: 'tblsInstalled', requestId: msg.requestId, ok: true, path: 'C:\\Users\\demo\\.cursor\\extensions\\globalStorage\\bin\\tbls.exe' });
       return;
     case 'importFile':
       send({ type: 'result', requestId: msg.requestId, ok: true, tables: 42, relations: 30, elapsedMs: 0 });

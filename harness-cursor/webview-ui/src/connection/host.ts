@@ -2,6 +2,10 @@ import type { ConnectionHostMessage, ConnectionInit, ConnectionResult, Connectio
 import { postRaw } from '../vscode';
 
 type Picked = Extract<ConnectionHostMessage, { type: 'filePicked' }>;
+type TblsPathPicked = Extract<ConnectionHostMessage, { type: 'tblsPathPicked' }>;
+type TblsTested = Extract<ConnectionHostMessage, { type: 'tblsTested' }>;
+type TblsInstalled = Extract<ConnectionHostMessage, { type: 'tblsInstalled' }>;
+
 type WithoutRequestId<T> = T extends unknown ? Omit<T, 'requestId'> : never;
 type RequestMessage = Extract<ConnectionWebviewMessage, { requestId: string }>;
 
@@ -51,6 +55,27 @@ export async function run(message: WithoutRequestId<Extract<RequestMessage, { ty
 export async function pickFile(purpose: 'sqlite' | 'json'): Promise<Omit<Picked, 'type' | 'requestId'>> {
   const reply = await request({ type: 'pickFile', purpose });
   if (reply.type !== 'filePicked') return {};
+  const { type: _type, requestId: _id, ...rest } = reply;
+  return rest;
+}
+
+export async function pickTblsPath(): Promise<Omit<TblsPathPicked, 'type' | 'requestId'>> {
+  const reply = await request({ type: 'pickTblsPath' });
+  if (reply.type !== 'tblsPathPicked') return {};
+  const { type: _type, requestId: _id, ...rest } = reply;
+  return rest;
+}
+
+export async function testTbls(): Promise<Omit<TblsTested, 'type' | 'requestId'>> {
+  const reply = await request({ type: 'testTbls' });
+  if (reply.type !== 'tblsTested') return { ok: false, error: '插件返回了意外的结果' };
+  const { type: _type, requestId: _id, ...rest } = reply;
+  return rest;
+}
+
+export async function installTbls(): Promise<Omit<TblsInstalled, 'type' | 'requestId'>> {
+  const reply = await request({ type: 'installTbls' });
+  if (reply.type !== 'tblsInstalled') return { ok: false, error: '插件返回了意外的结果' };
   const { type: _type, requestId: _id, ...rest } = reply;
   return rest;
 }

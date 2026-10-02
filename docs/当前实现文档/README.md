@@ -1,7 +1,7 @@
 # Harness 工程索引（当前实现）
 
 > 面向开发者和 AI agent 的快速上手索引。先读"一分钟概览"和"目录地图"，改功能时查"改什么去哪里"。
-> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-09-30（第二阶段修复文档 4 完成：去双击创建表、P2 分区画布手动调整大小 + 任意位置拖动、P3 拖动节点到分区框边缘时用迟滞带消除闪烁）。
+> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-10-02（第二阶段方案 E 上线：tbls 自动下载 + 用户覆盖 + 错误兜底三按钮）。
 
 ## 1. 一分钟概览
 
@@ -29,7 +29,7 @@ Harness 是一个 Cursor / VS Code 插件，用 **tbls 的 JSON 格式**作为�
 | :-- | :-- |
 | 插件主进程 | TypeScript，esbuild 打包到 `dist/extension.js`，VS Code API ≥ 1.90 |
 | Webview | Vue 3 + Vue Flow（画布）+ elkjs（自动布局）+ mermaid 12（设计图预览，按需加载），Vite 8 构建到 `dist/webview/` |
-| 外部工具 | tbls（v1.96.0 验证过），通过 `harness.tblsPath` 找到 |
+| 外部工具 | tbls（v1.96.0 验证过）；默认自动下载到 `<globalStorage>/bin/`（方案 E），需要时也可用 `harness.tblsPath` 指向本地 tbls |
 | 测试 | vitest（`test/`，只测纯函数，不依赖 vscode） |
 | 依赖 | `yaml`、`vue`、`@vue-flow/*`、`elkjs`、`mermaid` |
 
@@ -53,7 +53,10 @@ npm run package      # 打 .vsix
 
 | 设置 | 默认 | 作用 |
 | :-- | :-- | :-- |
-| `harness.tblsPath` | `tbls` | tbls 可执行文件路径，在 PATH 里就不用改 |
+| `harness.tblsPath` | `""` | tbls 可执行文件。空 = 用内置版本（自动下载到 `<globalStorage>/bin/`）；填 `tbls` 等 PATH 名或绝对路径时优先用本地版本 |
+| `harness.tblsVersion` | `""`（= 扩展版本） | 内置 tbls 的目标版本（带不带 `v` 都行）。`tblsPath` 为空时生效 |
+| `harness.tblsDownloadBaseUrl` | `https://github.com/k1LoW/tbls/releases` | 内置 tbls 的 release 页地址 |
+| `harness.tblsAutoDownload` | `true` | 是否在 `activate` 时自动下载缺失的内置 tbls。关掉就只能手动调 `harness.tbls.repair` |
 | `harness.storageDir` | 空 | 存储根目录；空时用 `context.globalStorageUri` |
 | `harness.tblsTimeoutSeconds` | 120 | 单次 tbls 执行超时 |
 
@@ -89,7 +92,8 @@ harness-cursor/
 │  │  ├─ diagramProtocol.ts  设计图编辑器 Webview ⇄ 主进程消息
 │  │  ├─ connection.ts     连接配置 ConnectionProfile、CONNECTION_DRIVERS（各库字段/端口/加密选项）、buildDsn、validateProfile、connectionLabel（显示名 host:port/db）、默认连接名、凭据序列化、遮罩
 │  │  ├─ protocol.ts       ★ 画布 Webview ⇄ 主进程消息（HostMessage / WebviewMessage）、SourceData、DesignContext、WorkspaceCatalog、ComparisonData
-│  │  ├─ connectionProtocol.ts  连接页面 Webview ⇄ 主进程消息
+│  │  ├─ connectionProtocol.ts  连接页面 Webview ⇄ 主进程消息（含 `pickTblsPath` / `testTbls` / `installTbls` / `openTblsReleases`、TblsStatus）
+│  │  ├─ tblsPlatform.ts        纯函数：根据 platform/arch 选 tbls release 资产（pickAsset）、二进制文件名（binaryFilename）、bin 子目录名（binDirName）
 │  │  └─ editProtocol.ts   编辑页面 Webview ⇄ 主进程消息（EditInit / EditValues）
 │  ├─ workspace/
 │  │  ├─ storage.ts        ★ 存储目录读写：HarnessStorage / HarnessWorkspace / Design（design.yml、schema.json、ext.json、layout.json、diagrams/、comparisons.json） / DbSource；ID 独占分配 claim()
@@ -104,21 +108,27 @@ harness-cursor/
 │  │                         applyChange（DesignOp + 布局 op + 设计图文件，编辑器打开时进撤销栈，否则直接写盘）、scope 切换、剪贴板（setClipboard/paste/pasteItems）、
 │  │                         moveItems（跨层移动 + 命名空间改名确认）、deletePartition（连同内容，可撤销）、placeDiagram/deleteDiagram、source/add & remove、table/copyToDesign、design/rename
 │  ├─ connection/
-│  │  ├─ connectionPanel.ts   连接页面（WebviewPanel）：新建/编辑连接、测试、连接后创建 db、导入 JSON
-│  │  └─ errors.ts            tbls 报错 → 中文友好提示 friendlyTblsError
+│  │  ├─ connectionPanel.ts   连接页面（WebviewPanel）：新建/编辑连接、测试、连接后创建 db、导入 JSON；init 消息带 TblsStatus，渲染 tbls 状态行 + 下载/测试/选文件按钮
+│  │  └─ errors.ts            tbls 报错 → 中文友好提示（friendlyTblsError / friendlyMissingTblsError），错误里带 `action` 让 UI 给出按按钮
 │  ├─ diagram/
 │  │  ├─ erSync.ts         computeErSync(doc, diagram)：ER 图 vs 表结构 → 同步项（新增/修改/删除表、字段、关系；外键列推断；多选项）
 │  │  ├─ diagramService.ts ★ 设计图读写（打开的文档优先）、计算待同步、prepare（按当前文本重新检测）、删除确认、编辑器内撤销、改 refs/ignored
 │  │  └─ diagramEditor.ts  设计图自定义文本编辑器（CustomTextEditorProvider，viewType harness.diagram）
 │  ├─ edit/editPanel.ts    编辑页面（WebviewPanel）：工作区 / 设计画布 / 分区画布的名称、说明，设计画布的目标数据库类型。open(kind, ws, id?, designId?)。
-│  ├─ tbls/runner.ts       调用 tbls（DSN 走环境变量 TBLS_DSN，超时、取消、报错遮罩），stripDsnFromTblsConfig
+│  ├─ tbls/
+│  │  ├─ runner.ts       调用 tbls（DSN 走环境变量 TBLS_DSN，超时、取消、报错遮罩），stripDsnFromTblsConfig
+│  │  ├─ resolver.ts     解析 tbls 路径：用户配置 > 内置版本（必要时自动下载）；throw TblsResolveError 给 UI 兜底
+│  │  ├─ manager.ts      写 `<globalStorage>/bin/tbls-<v>-<plat>-<arch>/tbls(.exe)` 与 tbls.current.json；install（下载 + 校验 sha256 + 解压 + chmod）/ probe / verify / readCurrent / uninstall
+│  │  ├─ ensure.ts       activate 时（非阻塞）自动下载缺失的内置 tbls
+│  │  └─ releases.ts     resolveBaseUrl / resolveVersion：从配置读 base URL 和版本
 │  ├─ views/workspaceTree.ts  ★ 侧边栏树 TreeDataProvider：工作区 → 设计画布/数据库 两组 → 每层 设计表/设计图/分区画布（levelGroup.*，递归）→ 表/字段；layoutOf 读编辑器里的布局；数据库品牌图标；getParent 支持 reveal
 │  ├─ views/treeDragAndDrop.ts  树拖拽：拖到设计画布 / 分区画布 / 分组节点 = 剪切到那一层（canvases.pasteItems）
 │  ├─ commands/            命令实现（见第 7 节）
 │  │  ├─ common.ts         Harness 上下文接口、register、pickWorkspace/pickSourceId/pickDesign(h,…)、sourceName、canvasNames、revealInTree、confirm 等
 │  │  ├─ workspace.ts      新建工作区（自动创建设计画布）/ rename / delete / add / rename(F2分发) / edit（工作区/设计画布/分区画布） / refresh / openStorage
 │  │  ├─ design.ts         新建设计画布（默认名"设计画布"）/ createBlank / createFromDb / createFromFile / setDriver / openRaw / openExt / rename / delete（列出分区画布和设计图数量）
-│  │  ├─ db.ts             create / editConnection / sync / clearConnection / importSnapshot / importTblsConfig / openConfig / openSnapshot / delete
+│  │  ├─ db.ts             create / editConnection / sync / clearConnection / importSnapshot / importTblsConfig / openConfig / openSnapshot / delete；sync 错误用 friendlyMissingTblsError，action 字段驱动"下载 tbls / 设置 tbls 路径 / 查看 Releases…"三按钮
+│  │  ├─ tbls.ts           harness.tbls.checkUpdate（已安装版本 vs 内置版本）/ repair（重新下载）/ openFolder（打开 `<globalStorage>/bin/`）
 │  │  ├─ canvas.ts         design.open、partition.open / create / rename / delete / setNamespace、item.copy / cut / paste、source.addToCanvas、table.revealInCanvas
 │  │  └─ diagram.ts        diagram.create / open / openText / rename / delete / copyForAI、design.copyForAI
 │  └─ webview/html.ts      Webview HTML（生产：dist + nonce CSP；开发：指向 Vite），<body data-view> 选择页面
@@ -267,13 +277,50 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 `harness.db.create` → `ConnectionPanels.openCreate(ws)` 打开 WebviewPanel（`view:'connection'`）：
 
-1. `init`：库类型列表默认上次选择。页面**没有名称输入框**，只显示"显示为"预览（`connectionLabel(profile)`，随输入实时变化）。
-2. 测试连接：`validateProfile` → `buildDsn` → `tblsOutJson`（`TBLS_DSN` 环境变量、超时、可取消）→ 结果按 profile+过滤条件的 sha256 缓存 5 分钟。
+1. `init`：库类型列表默认上次选择。页面**没有名称输入框**，只显示"显示为"预览（`connectionLabel(profile)`，随输入实时变化）。同时下发 `TblsStatus`：
+   - `bundled`：内置 tbls 已下载，状态行显示版本和路径。
+   - `user-configured`：`harness.tblsPath` 已设置，状态行显示 ⚠ 提示用本地版本。
+   - `missing`：内置还没下载，状态行提示缺失，附「下载内置 tbls / 选择本地文件… / 测试」三个按钮；测试会立刻下载并验证。
+2. 测试连接：`validateProfile` → `buildDsn` → `resolveTblsPath`（内置版本不存在时**同步触发下载**，下载失败抛 `TblsResolveError`，UI 显示"下载 tbls / 设置 tbls 路径 / 查看 Releases…"）→ `tblsOutJson`（`TBLS_DSN` 环境变量、超时、可取消）→ 结果按 profile+过滤条件的 sha256 缓存 5 分钟。
 3. 连接：（有缓存用缓存，否则执行 tbls）→ `ws.claimDb()` 占 `dbN` 目录 → 写 `source.yml`（备用名 + driver，不含主机）→ 存凭据 → 写快照；任何一步失败回滚（删凭据、删目录）。
 4. 成功后关闭页面、在树中定位新数据库。**不会加入任何画布**。
 
 编辑连接：`harness.db.editConnection` → `openEdit(db)`，密码/自定义 DSN 不回传给 Webview，留空表示沿用已保存值。
-同步：`harness.db.sync` 读凭据 → `parseStoredConnection` → `buildDsn` → tbls → 写快照，错误经 `friendlyTblsError` 提示并提供"编辑连接…"。
+同步：`harness.db.sync` 读凭据 → `parseStoredConnection` → `buildDsn` → `resolveTblsPath` → tbls → 写快照，错误经 `friendlyTblsError` / `friendlyMissingTblsError` 提示并提供"编辑连接… / 设置 tbls 路径 / 下载 tbls / 查看 Releases…"。
+
+#### 5.7.1 tbls 二进制管理（方案 E）
+
+`harness.tblsPath` 留空时使用内置版本。布局：
+
+```
+<globalStorage>/bin/
+├─ tbls.current.json                  { version, platform, arch, filename, sha256, installedAt, source }
+└─ tbls-<v>-<platform>-<arch>/
+   ├─ tbls.exe（windows）或 tbls（mac/linux）
+   ├─ tbls_v1.86.0_windows_amd64.zip（下载原文件，可选）
+   └─ *.sha256 文件（下载时一并获取时记录）
+```
+
+- **激活**：`extension.ts` 在 `activate` 末尾调用 `ensureTbls(context)`（**非阻塞** catch 记日志）。`ensureTbls` 仅当 `harness.tblsPath` 为空 + `harness.tblsAutoDownload !== false` + `probe` 找不到对应版本时调 `install`。
+- **`install(context, version, baseUrl)`**（`tbls/manager.ts`）：
+  1. `pickAsset(platform, arch, version)` 决定文件名（`tbls_v1.86.0_<plat>_<arch>.zip|tar.gz`），不支持组合抛错。
+  2. `probe` 已存在则直接返回。
+  3. 用 `globalThis.fetch` 拼 `${baseUrl}/v${version}/<filename>` 下载，存到 `os.tmpdir()` 临时目录。
+  4. 优先尝试下载 `<filename>.sha256`，命中则在解压前校验压缩包 sha256，不一致抛 `下载校验失败`。
+  5. 解压：`tar.x` 解 `.tar.gz`，手写 PKZIP 解 `.zip`（找条目名以 `tbls` 或目标名结尾的，只写这一个文件，避免依赖第三方 unzip）。
+  6. 非 Windows 上 `chmod 0o755`。
+  7. 写 `tbls.current.json` 记录 `source: 'downloaded'`。
+- **`resolveTblsPath(context, configured?, { extensionVersion, skipBundled?, skipDownload? })`**（`tbls/resolver.ts`）：
+  1. 配置非空且路径存在 → 返回它（用户覆盖）。
+  2. 否则 `probe(context, extensionVersion)`。
+  3. 没有就抛 `TblsResolveError('missing-bundled')`（或自动下载失败时 `'download-failed'`），由调用方决定 UI 兜底。
+- **状态查询**：`connectionPanel.buildTblsStatus()` 读 `probe` + 配置 → `TblsStatus`，init 消息里下发；状态行按钮触发 `pickTblsPath`（写设置）/ `testTbls`（`execFile --version`）/ `installTbls`（调 `install`）；完成都重新发 `ready` 重拉 init。
+- **命令**（`commands/tbls.ts`）：
+  - `harness.tbls.checkUpdate`：跑 `--version` 对比 installedVersion 和 bundledVersion，提示"已是最新 / 可下载 v…"，并提供"重新下载"。
+  - `harness.tbls.repair`：`withProgress` 调 `install`，完成后 `verify`（再 sha256 一次），开 `openFolder`。
+  - `harness.tbls.openFolder`：确保 `bin/` 存在后 `env.openExternal`。
+- **同步/连接错误兜底**：`friendlyMissingTblsError(TblsResolveError)` → `{ message, action: 'downloadTbls' }`；`db.ts` 错误对话框展示 "下载 tbls / 设置 tbls 路径 / 查看 Releases…" 三按钮，分别跳到 `harness.tbls.repair` / 打开设置 / 浏览器打开 GitHub Releases。
+- **方案文档**：`docs/step2initdev/04tbls配置/`（README + 4 篇）。
 
 ### 5.8 新建
 
@@ -329,7 +376,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 **设计图编辑器**（`src/shared/diagramProtocol.ts`）：Host→Web `init | doc | context | sync{group?, undo?} | reply`；Web→Host `ready | code | meta | sync/apply | sync/ignore | sync/undo | regenerate | command{copyForAI|openText|openCanvas}`。
 
-**连接页面**（`src/shared/connectionProtocol.ts`）：Web→Host `ready | test | connect | importFile | pickFile | openUrl | openTblsSettings | cancel | close`；Host→Web `init | result | filePicked`。`connect` / `importFile` 不带名称：连接用 `defaultConnectionName` 作为备用名，导入用 schema 名或文件名。
+**连接页面**（`src/shared/connectionProtocol.ts`）：Web→Host `ready | test | connect | importFile | pickFile | pickTblsPath | testTbls | installTbls | openTblsSettings | openTblsReleases | openUrl | cancel | close`；Host→Web `init{..., tblsStatus}`、`result | filePicked | tblsPathPicked | tblsTested | tblsInstalled`。`connect` / `importFile` 不带名称：连接用 `defaultConnectionName` 作为备用名，导入用 schema 名或文件名。`tblsStatus` 是 `{ source: 'bundled' | 'user-configured' | 'missing', bundledVersion, installedVersion?, resolvedPath? }`。
 
 **编辑页面**（`src/shared/editProtocol.ts`）：Web→Host `ready | save{name, description, driver?} | close`；Host→Web `init{kind: workspace|design|partition, name, description, driver?, drivers?, tableCount?} | result`。
 
@@ -340,7 +387,8 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | `workspace.ts` | `workspace.create`（一键，自带设计画布）/ `rename` / `delete` / `add`（新建…快捷菜单：设计画布 + 数据库）、`harness.rename`（F2 分发）、`harness.edit`（打开编辑页面）、`refresh`、`openStorage` |
 | `design.ts` | `design.create`（一键空白，默认名"设计画布"）/ `createBlank` / `createFromDb` / `createFromFile` / `setDriver` / `openRaw` / `openExt` / `rename` / `delete`；子菜单 `harness.design.newMenu` |
 | `diagram.ts` | `diagram.create` / `open` / `openText` / `rename` / `delete` / `copyForAI`、`design.copyForAI` |
-| `db.ts` | `db.create`（打开连接页）/ `editConnection` / `sync` / `clearConnection` / `importSnapshot` / `importTblsConfig` / `openConfig` / `openSnapshot` / `delete`（删除确认列出受影响的设计画布） |
+| `db.ts` | `db.create`（打开连接页）/ `editConnection` / `sync` / `clearConnection` / `importSnapshot` / `importTblsConfig` / `openConfig` / `openSnapshot` / `delete`（删除确认列出受影响的设计画布）；`sync` 错误对话框带 "下载 tbls / 设置 tbls 路径 / 查看 Releases…" 三按钮 |
+| `tbls.ts` | `tbls.checkUpdate`（对比内置版本 vs 已装版本）/ `repair`（重新下载并 sha256 自检）/ `openFolder`（打开 `<globalStorage>/bin/`） |
 | `canvas.ts` | `design.open`（打开设计画布，可带层级）、`partition.open` / `create` / `rename` / `delete` / `setNamespace`、`item.copy` / `cut` / `paste`（树上 Ctrl+C / X / V，表、设计图、分区画布通用）、`source.addToCanvas`、`table.revealInCanvas`（跨设计搜索，切换到表所在层） |
 
 多画布命令 `canvas.*` 和分区命令 `zone.*` 已删除。
@@ -356,8 +404,12 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | 新增设计编辑动作 | `shared/designOps.ts` 加 DesignOp（写测试 `test/designOps.test.ts`）→ Webview 调 `designOp` |
 | 新增画布 Webview⇄主进程消息 | `shared/protocol.ts` → `canvasEditor.ts onMessage` → `webview-ui/src/store.ts` / 组件；同步改 `dev/mockHost.ts` |
 | 支持新的数据库类型 / 修改 DSN 拼接 | `shared/connection.ts`（`CONNECTION_DRIVERS`、`buildDsn`）+ `test/connection.test.ts` |
-| tbls 报错提示 | `connection/errors.ts` |
+| tbls 报错提示 / 友好错误 | `connection/errors.ts`（`friendlyTblsError` + `friendlyMissingTblsError`，后者带 `action`） |
 | tbls 调用参数、超时 | `tbls/runner.ts` |
+| tbls 二进制解析（用户覆盖、内置下载、自动选择） | `tbls/resolver.ts` + `tblsPlatform.ts`（`pickAsset`） |
+| tbls 下载 / 安装 / 校验 / 查版本 | `tbls/manager.ts`（`install` / `probe` / `verify` / `readCurrent` / `uninstall`） |
+| tbls 自动下载入口 | `tbls/ensure.ts`（`ensureTbls`）+ `extension.ts` activate 末尾 |
+| tbls 命令（checkUpdate / repair / openFolder） | `commands/tbls.ts` |
 | 存储格式、新文件类型、ID 分配 | `shared/workspace.ts`（类型）+ `workspace/storage.ts`（读写） |
 | 跨文件联动（改名/删除） | `workspace/refactor.ts` |
 | 分区画布、层级、跨层移动 | `shared/canvas.ts`（op）+ `canvasEditor.ts`（moveItems / deletePartition）+ `components/CanvasView.vue`（拖入拖出 / 迟滞带 / dropTarget 高亮） |
@@ -407,6 +459,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | `test/diff.test.ts` | 差异对比 |
 | `test/workspace.test.ts` | `nextSeq` / `nextDefaultName` / `uniqueName` / ID 校验 |
 | `test/connection.test.ts` | `connectionLabel` 显示名、各库 `buildDsn`、编码、IPv6、默认加密、参数覆盖、SQLite 路径、校验、凭据序列化、遮罩、`friendlyTblsError` |
+| `test/tbls.test.ts` | `pickAsset` 各平台/架构映射（zip/tar.gz、文件名前缀 `v` 处理）、不支持组合返回 undefined、`binDirName` 稳定 |
 | `test/fixtures.test.ts` | 浏览器 mock 示例数据（`webview-ui/src/dev/fixtures.ts`）能归一化，并覆盖画布要展示的各类差异 |
 | `test/mermaidEr.test.ts` | 设计图文件读写往返、erDiagram 解析（别名、键、注释、行号、错误）、表结构 → ER 图 → 解析往返 |
 | `test/diagramSync.test.ts` | ER 图同步项：新增/修改/删除、依赖、没字段块的实体、关系类型/基数、外键列推断与多选、多对多、忽略；viewpoints 表改名和删除 |
@@ -416,7 +469,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 - 不识别改名（显示为一边缺少一边多出）；复合外键在画布上只连第一列。
 - MCP Server（不得向 AI 暴露连接信息）、`tbls lint` 接入未做。
-- 连接页面、自动命名尚未在真实 Cursor 环境中完整走查（单元测试、typecheck、build 已通过）。
+- 连接页面、自动命名、tbls 自动下载 / 状态行 / 三按钮兜底尚未在真实 Cursor 环境中完整走查（单元测试、typecheck、build 已通过）。
 - 设计图：表改名不会同步改图里的名字和 `refs`；不能手动把"删除 + 新增"配对成改名；编辑器内撤销只有一次、用按钮；非 ER 图不同步。详见 `docs/step2initdev/03设计库开发/第一阶段完成说明与第二阶段方案.md`。
 - 旧版 `canvases/*.json` 不迁移到 `layout.json`（旧布局里的坐标、数据库表、便签会丢失，设计表本身不受影响）。
 - 分区画布没有"默认展开 2 层"，只按每个框的 `collapsed` 显示；折叠的框不能作为拖放目标。
@@ -424,7 +477,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 - 复制 ER 图时只改 `refs`，不改写 Mermaid 代码里的表名。
 - 缩小时简化显示（只显示表名）未做。
 - 聚焦时不淡化其他对象（只缩放视图），可在后续加"淡化其他内容"开关。
-- 修复文档 4（去双击创建表、分区手动调整大小、拖动迟滞消除闪烁）完成后尚未在真实 Cursor 环境中完整走查（typecheck、133 个单元测试、build 已通过）。
+- 修复文档 4（去双击创建表、分区手动调整大小、拖动迟滞消除闪烁）以及方案 E（tbls 自动下载 + 用户覆盖 + 错误兜底）已完成开发（typecheck、140 个单元测试、build 已通过），尚未在真实 Cursor 环境中完整走查。
 
 ## 12. 相关文档
 
@@ -437,3 +490,4 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | `docs/step2initdev/01初始化/` | 阶段二：Vite HMR、工作区模型、侧边栏、画布、开发计划、实现记录 |
 | `docs/step2initdev/02新增设置/` | 自动命名（01）、连接页面（02）、tbls 能力分析（03）、开发计划（04） |
 | `docs/step2initdev/03设计库开发/` | 设计库需求分析、初步优化方案、第一阶段完成说明与第二阶段方案、**第二阶段方案**（合并为设计画布、画布分区、数据库表复制）、**第二阶段修复文档**（树结构调整、显示全部表 toggle）、**第二阶段修复文档 2**（嵌套分区画布、命名空间、复制剪切、设计图卡片、面板折叠；第 5.12 节是实现与方案的偏差）、**第二阶段修复文档 3**（R1 去掉层级切换改为聚焦、R2 聚焦按钮、R3 右侧设计图编辑、R4 右侧面板增强、R5 收尾）、**第二阶段修复文档 4**（去双击创建表、P2 分区框手动调整大小、P3 拖动边缘迟滞消除闪烁） |
+| `docs/step2initdev/04tbls配置/` | 第二阶段方案 E：tbls 现状与问题、方案与选型、推荐方案、影响范围和实现计划 |

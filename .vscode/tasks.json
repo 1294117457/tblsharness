@@ -2,11 +2,11 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "build",
+      "label": "build-harness",
       "type": "shell",
       "command": "npm run build",
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}/harness-cursor"
       },
       "group": {
         "kind": "build",

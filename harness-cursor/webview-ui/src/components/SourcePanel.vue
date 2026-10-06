@@ -14,6 +14,7 @@ const emit = defineEmits<{
   'create-table': [];
   'create-diagram': [];
   collapse: [];
+  export: [];
 }>();
 
 const search = ref('');
@@ -140,6 +141,7 @@ function indeterminate(some: boolean, all: boolean) {
       <span>数据源</span>
       <span class="header-actions">
         <button class="secondary small" @click="adding = !adding">+ 添加数据库</button>
+        <button class="secondary small" title="把当前画布的设计导出成一份 AI 可以直接读取的目录" @click="emit('export')">⬇ 导出</button>
         <button class="icon-btn" title="收起数据源面板" @click="emit('collapse')">«</button>
       </span>
     </div>

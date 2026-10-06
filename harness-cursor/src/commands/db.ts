@@ -3,6 +3,7 @@ import { friendlyMissingTblsError, friendlyTblsError } from '../connection/error
 import { buildDsn, describeProfile, parseStoredConnection, secretsOf, serializeConnection } from '../shared/connection';
 import { maskSecret, parseTblsJson, stripDsnFromTblsConfig, TblsError, tblsOutJson } from '../tbls/runner';
 import { resolveTblsPath, TblsResolveError } from '../tbls/resolver';
+import { readTblsConfig } from '../tbls/config';
 import { readText, writeText } from '../workspace/fsUtil';
 import { deleteDbFromDesigns, designNamesReferencingDb } from '../workspace/refactor';
 import type { DbSource } from '../workspace/storage';
@@ -33,13 +34,9 @@ export function registerDbCommands(h: Harness): void {
     const dsn = buildDsn(profile);
     const secrets = secretsOf(profile);
     const errorKey = `${db.workspace.id}/${db.id}`;
-    const config = vscode.workspace.getConfiguration('harness');
-    const tblsPath = await resolveTblsPath(
-      h.context,
-      config.get<string>('tblsPath', 'tbls') || 'tbls',
-      { extensionVersion: h.context.extension.packageJSON.version as string },
-    );
-    const timeoutMs = Math.max(5, config.get<number>('tblsTimeoutSeconds', 120)) * 1000;
+    const config = readTblsConfig();
+    const tblsPath = await resolveTblsPath(h.context);
+    const timeoutMs = config.timeoutSeconds * 1000;
     const configPath = (await db.hasTblsConfig()) ? db.tblsConfigFile.fsPath : undefined;
     await vscode.workspace.fs.createDirectory(db.snapshotsDir);
     try {

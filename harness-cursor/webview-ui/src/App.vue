@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import type { Connection } from '@vue-flow/core';
 import {
   DESIGN_SOURCE,
@@ -22,6 +22,7 @@ import { NODE_WIDTH, PART_HEADER, PART_PAD, type Position } from './canvas/layou
 import CanvasView from './components/CanvasView.vue';
 import ContextMenu, { type MenuItem } from './components/ContextMenu.vue';
 import DiffPanel from './components/DiffPanel.vue';
+import ExportDialog from './components/ExportDialog.vue';
 import Inspector from './components/Inspector.vue';
 import SourcePanel from './components/SourcePanel.vue';
 import SyncPanel from './components/SyncPanel.vue';
@@ -55,6 +56,8 @@ import { getState, onHostMessage, post, setState } from './vscode';
 const view = computed(() => buildView(canvas.value, state.sources, state.comparison, state.diagrams));
 const levelLists = computed(() => levelContent(view.value, state.level));
 const flow = ref<InstanceType<typeof CanvasView>>();
+/** Typed handle on the dialog so the host's `export/result` can be handed to it. */
+const exportDialog = useTemplateRef<InstanceType<typeof ExportDialog>>('exportDialog');
 const rightTab = ref<'inspector' | 'diff' | 'sync'>('inspector');
 const menu = ref<{ x: number; y: number; title?: string; items: MenuItem[] }>();
 const pointer = { x: 0, y: 0, overCanvas: false };
@@ -618,7 +621,11 @@ watch(
 
 let dispose: (() => void) | undefined;
 onMounted(() => {
-  dispose = onHostMessage(handleHostMessage);
+  // The store handles state; the export dialog owns its own request, so that case stops here.
+  dispose = onHostMessage((msg) => {
+    if (msg.type === 'export/result') exportDialog.value?.applyResult(msg);
+    else handleHostMessage(msg);
+  });
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('pointerup', onPointer, true);
   window.addEventListener('pointerdown', onPointer, true);
@@ -701,6 +708,7 @@ onUnmounted(() => {
             @remove-db-tables="removeDbTables"
             @create-table="createTable()"
             @create-diagram="menu = { x: pointer.x, y: pointer.y, title: '新建设计图（放在当前层）', items: diagramMenuItems(state.level) }"
+            @export="post({ type: 'export/open' })"
             @collapse="leftCollapsed = true"
           />
         </aside>
@@ -777,6 +785,13 @@ onUnmounted(() => {
     </template>
 
     <ContextMenu v-if="menu" :x="menu.x" :y="menu.y" :title="menu.title" :items="menu.items" @close="menu = undefined" />
+    <ExportDialog
+      v-if="state.exportRequest"
+      ref="exportDialog"
+      :request="state.exportRequest"
+      @close="state.exportRequest = undefined"
+      @done="(message) => { state.exportRequest = undefined; toast(message); }"
+    />
     <div v-if="toastVisible && state.toast" class="toast" :class="state.toast.level" @click="toastVisible = false">{{ state.toast.message }}</div>
   </div>
 </template>

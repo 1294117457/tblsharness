@@ -34,7 +34,7 @@ function handle(msg: ConnectionWebviewMessage) {
         driver: 'postgres',
         hasSavedPassword: false,
         filters: { exclude: ['pg_stat_statements', 'pgmq.*'], include: [] },
-        tblsStatus: { source: 'bundled', bundledVersion: '1.86.0', installedVersion: '1.86.0', resolvedPath: 'C:\\Users\\demo\\.cursor\\extensions\\harness.harness\\globalStorage\\bin\\tbls.exe' },
+        tblsStatus: { source: 'bundled', bundledVersion: '1.96.1', installedVersion: '1.96.1', verified: true, verifiedVersion: '1.96.1', resolvedPath: 'C:\\Users\\demo\\.cursor\\extensions\\harness.harness\\globalStorage\\bin\\tbls-1.96.1-win32-x64\\tbls.exe' },
       });
       return;
     case 'test':
@@ -61,13 +61,19 @@ function handle(msg: ConnectionWebviewMessage) {
       );
       return;
     case 'pickTblsPath':
-      send({ type: 'tblsPathPicked', requestId: msg.requestId, path: 'C:\\Program Files\\tbls\\tbls.exe' });
+      // Picking `broken` exercises the failure path: a file that can't run is rejected and the
+      // previous setting is kept.
+      if (new URLSearchParams(location.search).get('tbls') === 'broken') {
+        send({ type: 'tblsPathPicked', requestId: msg.requestId, path: 'C:\\temp\\notes.txt', ok: false, error: '无法运行 C:\\temp\\notes.txt：not a valid Win32 application' });
+      } else {
+        send({ type: 'tblsPathPicked', requestId: msg.requestId, path: 'C:\\Program Files\\tbls\\tbls.exe', ok: true, version: '1.96.1' });
+      }
       return;
     case 'testTbls':
-      send({ type: 'tblsTested', requestId: msg.requestId, ok: true, version: 'tbls version 1.6.0' });
+      send({ type: 'tblsTested', requestId: msg.requestId, ok: true, version: '1.96.1' });
       return;
     case 'installTbls':
-      send({ type: 'tblsInstalled', requestId: msg.requestId, ok: true, path: 'C:\\Users\\demo\\.cursor\\extensions\\globalStorage\\bin\\tbls.exe' });
+      send({ type: 'tblsInstalled', requestId: msg.requestId, ok: true, path: 'C:\\Users\\demo\\.cursor\\extensions\\globalStorage\\bin\\tbls-1.96.1-win32-x64\\tbls.exe', version: '1.96.1' });
       return;
     case 'importFile':
       send({ type: 'result', requestId: msg.requestId, ok: true, tables: 42, relations: 30, elapsedMs: 0 });

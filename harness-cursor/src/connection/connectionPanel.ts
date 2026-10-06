@@ -22,8 +22,9 @@ import type { DbSource, HarnessWorkspace } from '../workspace/storage';
 import { renderWebviewHtml, webviewOptions } from '../webview/html';
 import { friendlyMissingTblsError, friendlyTblsError } from './errors';
 import { resolveTblsPath, TblsResolveError } from '../tbls/resolver';
-import { install, probe } from '../tbls/manager';
-import { resolveBaseUrl } from '../tbls/releases';
+import { install, probe, TblsInstallError } from '../tbls/manager';
+import { readTblsConfig } from '../tbls/config';
+import { probeTblsVersion } from '../tbls/probeVersion';
 
 const LAST_DRIVER_KEY = 'harness.lastConnectionDriver';
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -189,23 +190,42 @@ class ConnectionPanel implements vscode.Disposable {
     });
   }
 
+  /**
+   * Describes the tbls Harness would use, and — importantly — whether it actually runs.
+   *
+   * The `user-configured` branch probes the *user's* path. It must not report the bundled
+   * version there: the two are unrelated, and showing "内置已安装 vX" next to a local path is
+   * misleading.
+   */
   private async buildTblsStatus(): Promise<TblsStatus> {
-    const config = vscode.workspace.getConfiguration('harness');
-    const configuredPath = (config.get<string>('harness.tblsPath', '') || '').trim();
-    const bundledVersion = (config.get<string>('harness.tblsVersion', '') || this.h.context.extension.packageJSON.version).replace(/^v/, '');
-    const installed = await probe(this.h.context, bundledVersion);
-    if (configuredPath) {
+    const config = readTblsConfig();
+
+    if (config.tblsPath) {
+      const info = await probeTblsVersion(config.tblsPath);
       return {
         source: 'user-configured',
-        bundledVersion,
-        installedVersion: installed ? bundledVersion : undefined,
-        resolvedPath: configuredPath,
+        bundledVersion: config.version,
+        resolvedPath: info.resolvedPath ?? config.tblsPath,
+        verified: info.ok,
+        verifiedVersion: info.version,
+        error: info.ok ? undefined : info.error,
       };
     }
+
+    const installed = await probe(this.h.context, config.version);
     if (installed) {
-      return { source: 'bundled', bundledVersion, installedVersion: bundledVersion, resolvedPath: installed.fsPath };
+      const info = await probeTblsVersion(installed.fsPath);
+      return {
+        source: 'bundled',
+        bundledVersion: config.version,
+        installedVersion: config.version,
+        resolvedPath: installed.fsPath,
+        verified: info.ok,
+        verifiedVersion: info.version,
+        error: info.ok ? undefined : info.error,
+      };
     }
-    return { source: 'missing', bundledVersion };
+    return { source: 'missing', bundledVersion: config.version, verified: false };
   }
 
   /** In edit mode an empty password (or DSN) means "keep the saved one"; the page never receives it. */
@@ -251,21 +271,17 @@ class ConnectionPanel implements vscode.Disposable {
     this.abort?.abort();
     const abort = new AbortController();
     this.abort = abort;
-    const config = vscode.workspace.getConfiguration('harness');
+    const config = readTblsConfig();
     const started = Date.now();
     try {
       const result = await tblsOutJson({
-        tblsPath: await resolveTblsPath(
-          this.h.context,
-          config.get<string>('tblsPath', 'tbls') || 'tbls',
-          { extensionVersion: this.h.context.extension.packageJSON.version as string },
-        ),
+        tblsPath: await resolveTblsPath(this.h.context),
         dsn: buildDsn(profile),
         configPath: await this.configPath(),
         exclude: filters.exclude,
         include: filters.include,
         cwd: (this.db?.dir ?? this.ws.dir).fsPath,
-        timeoutMs: Math.max(5, config.get<number>('tblsTimeoutSeconds', 120)) * 1000,
+        timeoutMs: config.timeoutSeconds * 1000,
         signal: abort.signal,
         secrets: secretsOf(profile),
       });
@@ -415,45 +431,67 @@ class ConnectionPanel implements vscode.Disposable {
     this.post({ type: 'result', requestId, ...result });
   }
 
+  /**
+   * Picks a local tbls and validates it *before* persisting the setting.
+   *
+   * Writing the setting unconditionally is what produced the silent "selected but broken" state:
+   * any file (even a .txt) looked like a success. Now the file must run `--version` first, and a
+   * failure leaves the previous setting untouched.
+   */
   private async handlePickTblsPath(requestId: string): Promise<void> {
     const [file] = (await vscode.window.showOpenDialog({
       title: '选择 tbls 可执行文件',
       canSelectMany: false,
-      filters: { '所有文件': ['*'] },
+      filters: process.platform === 'win32'
+        ? { 'tbls 可执行文件': ['exe', 'cmd', 'bat'], 所有文件: ['*'] }
+        : { 所有文件: ['*'] },
     })) ?? [];
     if (!file) {
       this.post({ type: 'tblsPathPicked', requestId });
       return;
     }
+
+    const info = await probeTblsVersion(file.fsPath);
+    if (!info.ok) {
+      this.post({ type: 'tblsPathPicked', requestId, path: file.fsPath, ok: false, error: info.error });
+      return;
+    }
+
     await vscode.workspace.getConfiguration('harness').update('tblsPath', file.fsPath, vscode.ConfigurationTarget.Global);
-    this.post({ type: 'tblsPathPicked', requestId, path: file.fsPath });
+    this.post({ type: 'tblsPathPicked', requestId, path: file.fsPath, ok: true, version: info.version });
   }
 
+  /** The "测试" button: run the same resolution the real run uses, then report the version. */
   private async handleTestTbls(requestId: string): Promise<void> {
     try {
-      const path = await resolveTblsPath(this.h.context, undefined, { extensionVersion: this.h.context.extension.packageJSON.version as string });
-      const { execFile } = await import('node:child_process');
-      const version = await new Promise<string>((resolve, reject) => {
-        execFile(path, ['--version'], { timeout: 10_000, windowsHide: true }, (err, stdout) => {
-          if (err) reject(err);
-          else resolve(String(stdout).trim());
-        });
-      });
-      this.post({ type: 'tblsTested', requestId, ok: true, version });
+      const resolved = await resolveTblsPath(this.h.context);
+      const info = await probeTblsVersion(resolved);
+      if (!info.ok) {
+        this.post({ type: 'tblsTested', requestId, ok: false, error: info.error });
+        return;
+      }
+      this.post({ type: 'tblsTested', requestId, ok: true, version: info.version ?? info.raw });
     } catch (err) {
-      this.post({ type: 'tblsTested', requestId, ok: false, error: (err as Error).message });
+      const friendly = err instanceof TblsResolveError ? friendlyMissingTblsError(err) : undefined;
+      this.post({ type: 'tblsTested', requestId, ok: false, error: friendly?.message ?? (err as Error).message });
     }
   }
 
   private async handleInstallTbls(requestId: string): Promise<void> {
+    const config = readTblsConfig();
     try {
-      const config = vscode.workspace.getConfiguration('harness');
-      const version = (config.get<string>('harness.tblsVersion', '') || this.h.context.extension.packageJSON.version).replace(/^v/, '');
-      const baseUrl = resolveBaseUrl(config);
-      const installed = await install(this.h.context, version, baseUrl);
-      this.post({ type: 'tblsInstalled', requestId, ok: true, path: installed.fsPath });
+      const installed = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Harness：正在下载 tbls v${config.version}…`, cancellable: true },
+        (progress, token) => install(this.h.context, config.version, config.baseUrl, {
+          token,
+          onProgress: (message, increment) => (increment !== undefined ? progress.report({ increment }) : progress.report({ message })),
+        }),
+      );
+      const info = await probeTblsVersion(installed.fsPath);
+      this.post({ type: 'tblsInstalled', requestId, ok: true, path: installed.fsPath, version: info.version });
     } catch (err) {
-      this.post({ type: 'tblsInstalled', requestId, ok: false, error: (err as Error).message });
+      const detail = err instanceof TblsInstallError ? err.detail : undefined;
+      this.post({ type: 'tblsInstalled', requestId, ok: false, error: (err as Error).message, detail });
     }
   }
 

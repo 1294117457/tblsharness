@@ -9,12 +9,18 @@ export interface ConnectionFilters {
 export interface TblsStatus {
   /** Where the binary lives, in human terms. */
   source: 'bundled' | 'user-configured' | 'missing';
-  /** The version Harness wants to use (bundled version). */
+  /** The version Harness wants to use (the bundled version). */
   bundledVersion: string;
   /** What's currently installed under `<globalStorage>/bin/`, if any. */
   installedVersion?: string;
   /** Absolute path to the binary (only when source is not 'missing'). */
   resolvedPath?: string;
+  /** The version the binary reports from `--version`, when it could be probed. */
+  verifiedVersion?: string;
+  /** The binary exists *and* runs. False means the user must pick a different file. */
+  verified: boolean;
+  /** Why verification failed, already phrased for display. */
+  error?: string;
 }
 
 export interface ConnectionInit {
@@ -27,7 +33,7 @@ export interface ConnectionInit {
   hasSavedPassword: boolean;
   defaultSchema?: string;
   filters: ConnectionFilters;
-  /** Status of the bundled tbls binary, surfaced as a status row in the form. */
+  /** Status of the tbls binary, surfaced as a status row in the form. */
   tblsStatus: TblsStatus;
 }
 
@@ -48,12 +54,22 @@ export type ConnectionWebviewMessage =
 
 export type ConnectionResult =
   | { ok: true; tables: number; relations: number; elapsedMs: number; cached?: boolean }
-  | { ok: false; message: string; detail?: string; action?: 'setTblsPath' | 'downloadTbls' };
+  | { ok: false; message: string; detail?: string; action?: 'setTblsPath' | 'downloadTbls' | 'testTbls' };
 
 export type ConnectionHostMessage =
   | ({ type: 'init' } & ConnectionInit)
   | ({ type: 'result'; requestId: string } & ConnectionResult)
   | { type: 'filePicked'; requestId: string; path?: string; name?: string; tables?: number; error?: string }
-  | { type: 'tblsPathPicked'; requestId: string; path?: string; error?: string }
+  | {
+      type: 'tblsPathPicked';
+      requestId: string;
+      /** Absent when the user cancelled the dialog. */
+      path?: string;
+      /** True only when the file was probed with `--version` and actually ran. */
+      ok?: boolean;
+      /** Version reported by the picked binary, e.g. `1.96.1`. */
+      version?: string;
+      error?: string;
+    }
   | { type: 'tblsTested'; requestId: string; ok: boolean; version?: string; error?: string }
-  | { type: 'tblsInstalled'; requestId: string; ok: boolean; path?: string; error?: string };
+  | { type: 'tblsInstalled'; requestId: string; ok: boolean; path?: string; version?: string; error?: string; detail?: string };

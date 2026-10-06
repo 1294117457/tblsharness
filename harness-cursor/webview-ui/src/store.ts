@@ -2,7 +2,7 @@ import { reactive, shallowRef } from 'vue';
 import { applyCanvasEdit, emptyCanvas, partitionOf, partitionPath, ROOT_SCOPE, type CanvasEdit, type CanvasFile, type ItemRef, type MoveItem, type Viewport } from '@shared/canvas';
 import type { ClipboardMode, Position } from '@shared/clipboard';
 import type { DesignOp } from '@shared/designOps';
-import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, HostMessage, RevealTarget, SourceData, WorkspaceCatalog } from '@shared/protocol';
+import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, ExportRequest, HostMessage, RevealTarget, SourceData, WorkspaceCatalog } from '@shared/protocol';
 import type { SyncGroup } from '@shared/sync';
 import { post, request, settleReply } from './vscode';
 
@@ -43,6 +43,8 @@ interface State {
   editDiagram?: { id: string; seq: number };
   /** Asks the canvas to replace its selection with these nodes. */
   selectRequest?: { nodeIds: string[]; seq: number };
+  /** Inventory for the export dialog; present only while it is open. */
+  exportRequest?: ExportRequest;
   toast?: { message: string; level: 'info' | 'error'; seq: number };
   pending: SyncGroup[];
 }
@@ -185,6 +187,12 @@ export function handleHostMessage(msg: HostMessage): void {
       return;
     case 'pendingSync':
       state.pending = msg.groups;
+      return;
+    case 'export/items':
+      state.exportRequest = msg.request;
+      return;
+    case 'export/result':
+      // Handled by the dialog itself; it is the only thing that knows the request id.
       return;
     case 'reveal':
       reveal(msg.target);

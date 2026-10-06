@@ -53,9 +53,11 @@ const result = ref<{ res: ConnectionResult; signature: string; kind: 'test' | 'c
 const detailOpen = ref(false);
 const imported = ref<{ path: string; name?: string; tables?: number; error?: string }>();
 const tblsTesting = ref(false);
-const tblsTest = ref<{ ok: boolean; version?: string; error?: string } | undefined>();
+const tblsTest = ref<{ ok: boolean; version?: string; error?: string; detail?: string } | undefined>();
 const tblsInstalling = ref(false);
 const tblsPathPicker = ref(false);
+/** Set when the user picks a file: the outcome of validating it. */
+const tblsPick = ref<{ path: string; ok: boolean; version?: string; error?: string } | undefined>();
 
 const editing = computed(() => init.value?.mode === 'edit');
 const info = computed(() => driverInfo(form.driver));
@@ -171,12 +173,19 @@ function setTblsPath() {
   send({ type: 'openTblsSettings' });
 }
 
+/**
+ * Picks a local tbls. The host validates the file before saving it, so the reply tells us
+ * whether it actually works — surface that instead of silently reloading the form.
+ */
 async function chooseTblsPath() {
   if (busy.value || tblsPathPicker.value) return;
   tblsPathPicker.value = true;
+  tblsPick.value = undefined;
   try {
-    await pickTblsPath();
-    send({ type: 'ready' });
+    const picked = await pickTblsPath();
+    if (!picked.path) return; // dialog cancelled
+    tblsPick.value = { path: picked.path, ok: !!picked.ok, version: picked.version, error: picked.error };
+    if (picked.ok) send({ type: 'ready' });
   } finally {
     tblsPathPicker.value = false;
   }
@@ -186,6 +195,7 @@ async function verifyTbls() {
   if (busy.value || tblsTesting.value) return;
   tblsTesting.value = true;
   tblsTest.value = undefined;
+  tblsPick.value = undefined;
   try {
     tblsTest.value = await testTbls();
   } finally {
@@ -197,12 +207,13 @@ async function downloadTbls() {
   if (busy.value || tblsInstalling.value) return;
   tblsInstalling.value = true;
   tblsTest.value = undefined;
+  tblsPick.value = undefined;
   try {
     const res = await installTbls();
     if (res.ok) {
-      tblsTest.value = { ok: true, version: `已安装到 ${res.path ?? ''}`.trim() };
+      tblsTest.value = { ok: true, version: res.version ? `已安装 tbls ${res.version}` : `已安装到 ${res.path ?? ''}` };
     } else {
-      tblsTest.value = { ok: false, error: res.error ?? '下载失败' };
+      tblsTest.value = { ok: false, error: res.error ?? '下载失败', detail: res.detail };
     }
     send({ type: 'ready' });
   } finally {
@@ -276,11 +287,13 @@ async function downloadTbls() {
             <span class="label">tbls</span>
             <div class="tbls-info">
               <template v-if="init.tblsStatus.source === 'bundled'">
-                <span class="ok">✔ 内置 v{{ init.tblsStatus.bundledVersion }}</span>
+                <span v-if="init.tblsStatus.verified" class="ok">✔ 内置 v{{ init.tblsStatus.verifiedVersion ?? init.tblsStatus.bundledVersion }}</span>
+                <span v-else class="warn">⚠ 内置 v{{ init.tblsStatus.bundledVersion }} 无法运行{{ init.tblsStatus.error ? `：${init.tblsStatus.error}` : '' }}</span>
                 <span class="muted path" :title="init.tblsStatus.resolvedPath">{{ init.tblsStatus.resolvedPath }}</span>
               </template>
               <template v-else-if="init.tblsStatus.source === 'user-configured'">
-                <span class="warn">⚠ 使用本地 tbls</span>
+                <span v-if="init.tblsStatus.verified" class="ok">✔ 本地 tbls {{ init.tblsStatus.verifiedVersion ?? '已验证' }}</span>
+                <span v-else class="field-error">✖ 本地 tbls 无法运行{{ init.tblsStatus.error ? `：${init.tblsStatus.error}` : '' }}</span>
                 <span class="muted path" :title="init.tblsStatus.resolvedPath">{{ init.tblsStatus.resolvedPath }}</span>
               </template>
               <template v-else>
@@ -290,13 +303,23 @@ async function downloadTbls() {
           </div>
           <div class="tbls-actions">
             <button type="button" class="secondary small" @click="downloadTbls" :disabled="!!busy || tblsInstalling">下载内置 tbls</button>
-            <button type="button" class="secondary small" @click="chooseTblsPath" :disabled="!!busy || tblsPathPicker">选择本地文件…</button>
+            <button type="button" class="secondary small" @click="chooseTblsPath" :disabled="!!busy || tblsPathPicker">
+              {{ tblsPathPicker ? '正在验证…' : '选择本地文件…' }}
+            </button>
             <button type="button" class="secondary small" @click="verifyTbls" :disabled="!!busy || tblsTesting">{{ tblsTesting ? '正在测试…' : '测试' }}</button>
           </div>
-          <p v-if="tblsTest" class="tbls-info-text" :class="{ ok: tblsTest.ok, 'field-error': !tblsTest.ok }">
+          <p v-if="tblsPick" class="tbls-info-text" :class="tblsPick.ok ? 'ok' : 'field-error'">
+            <template v-if="tblsPick.ok">✔ 已使用本地 tbls {{ tblsPick.version ?? '' }}：{{ tblsPick.path }}</template>
+            <template v-else>✖ {{ tblsPick.error }}<br /><span class="muted">没有修改当前设置，请重新选择一个可执行文件。</span></template>
+          </p>
+          <p v-else-if="tblsTest" class="tbls-info-text" :class="{ ok: tblsTest.ok, 'field-error': !tblsTest.ok }">
             <template v-if="tblsTest.ok">✔ {{ tblsTest.version || '可执行' }}</template>
             <template v-else>✖ {{ tblsTest.error }}</template>
           </p>
+          <details v-if="tblsTest?.detail" class="detail">
+            <summary>详细信息</summary>
+            <pre>{{ tblsTest.detail }}</pre>
+          </details>
         </div>
 
         <p class="muted hint">ⓘ 建议使用只读账号。连接信息（主机、用户名、密码）只保存在系统凭据中，不会写入任何文件。Harness 只读取表结构，不读取表里的数据。</p>
@@ -328,6 +351,7 @@ async function downloadTbls() {
           <span class="field-error">✖ {{ result.res.message }}</span>
           <button v-if="result.res.action === 'setTblsPath'" type="button" class="secondary small" @click="setTblsPath">设置 tbls 路径</button>
           <button v-else-if="result.res.action === 'downloadTbls'" type="button" class="secondary small" @click="downloadTbls">下载 tbls</button>
+          <button v-else-if="result.res.action === 'testTbls'" type="button" class="secondary small" @click="verifyTbls">测试 tbls</button>
           <details v-if="result.res.detail" :open="detailOpen" class="detail" @toggle="detailOpen = ($event.target as HTMLDetailsElement).open">
             <summary>详细信息</summary>
             <pre>{{ result.res.detail }}</pre>

@@ -1,11 +1,17 @@
-import * as vscode from 'vscode';
+import { readTblsConfig } from './config';
 
-/** Resolves the configured download base URL (e.g. `https://github.com/k1LoW/tbls/releases`). */
-export function resolveBaseUrl(config: vscode.WorkspaceConfiguration): string {
-  return config.get<string>('harness.tblsDownloadBaseUrl', 'https://github.com/k1LoW/tbls/releases').replace(/\/$/, '');
+/**
+ * @deprecated Kept as thin re-exports so existing imports keep working.
+ * All configuration now flows through {@link readTblsConfig}; nothing reads
+ * `vscode.workspace.getConfiguration` for tbls settings directly anymore.
+ */
+
+/** The release *download* base URL (always ends in `/releases/download`). */
+export function resolveBaseUrl(): string {
+  return readTblsConfig().baseUrl;
 }
 
-/** Resolves the desired tbls version (e.g. `1.86.0`). Falls back to the extension's bundled version. */
-export function resolveVersion(config: vscode.WorkspaceConfiguration, extensionVersion: string): string {
-  return config.get<string>('harness.tblsVersion', extensionVersion).replace(/^v/, '');
+/** The bundled tbls version. Independent of the extension's own version. */
+export function resolveVersion(): string {
+  return readTblsConfig().version;
 }

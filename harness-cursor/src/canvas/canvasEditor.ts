@@ -22,7 +22,7 @@ import { ClipboardError, planCopy, planCut, type ClipboardData, type Position } 
 import { copyTableOps, type ConflictStrategy } from '../shared/copyTables';
 import { serializeDiagram } from '../shared/diagram';
 import { applyDesignOps, DesignOpError, serializeDesign, type DesignOp } from '../shared/designOps';
-import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, HostMessage, RevealTarget, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
+import type { ClipboardInfo, ComparisonData, DesignContext, DiagramData, ExportRequest, HostMessage, RevealTarget, SourceData, WebviewMessage, WorkspaceCatalog } from '../shared/protocol';
 import { SyncError } from '../shared/sync';
 import { readTextIfExists, writeText } from '../workspace/fsUtil';
 import { renameDesignTable, type OpenCanvasRegistry } from '../workspace/refactor';
@@ -230,6 +230,22 @@ export class CanvasEditorProvider implements vscode.CustomEditorProvider<CanvasD
 
   async revealTable(workspace: string, design: string, source: string, table: string, column?: string): Promise<void> {
     await this.open(workspace, design, { item: { kind: 'table', id: nodeId(source, table) }, column });
+  }
+
+  // ── Export ────────────────────────────────────────────────────────
+
+  /** Pushes the inventory to an open canvas webview. False when the design is not open. */
+  requestExport(workspace: string, design: string, request: ExportRequest): boolean {
+    const session = this.session(workspace, design);
+    if (!session) return false;
+    session.openExport(request);
+    return true;
+  }
+
+  /** Sends a path pick result or an export outcome back to the dialog. */
+  async postExportResult(requestId: string, result: { path?: string; message?: string; error?: string }): Promise<void> {
+    if (!requestId) return;
+    for (const session of this.sessions.values()) session.postExportResult(requestId, result);
   }
 
   /** Applies a design change: through the open editor (undoable) or straight to disk. Returns an error message. */
@@ -569,6 +585,8 @@ class CanvasSession implements vscode.Disposable {
   private sentSources = new Set<string>();
   private sentComparison = '';
   private sentDiagrams = '';
+  /** Inventory for the export dialog, held until the webview says it is ready. */
+  private exportRequest: ExportRequest | undefined;
   level: string | undefined;
 
   constructor(
@@ -611,6 +629,19 @@ class CanvasSession implements vscode.Disposable {
 
   pushClipboard(): void {
     if (this.ready) this.post({ type: 'clipboard', clipboard: this.provider.clipboardInfo(this.workspaceId, this.designId) });
+  }
+
+  // ── Export dialog ─────────────────────────────────────────────────
+
+  /** The dialog is opened by a command; opening before `ready` would drop the payload. */
+  openExport(request: ExportRequest): void {
+    this.exportRequest = request;
+    if (this.ready) this.post({ type: 'export/items', request });
+  }
+
+  postExportResult(requestId: string, result: { path?: string; message?: string; error?: string }): void {
+    void requestId;
+    this.post({ type: 'export/result', ...result });
   }
 
   onDiagramChange(ref: DiagramRef): void {
@@ -703,12 +734,24 @@ class CanvasSession implements vscode.Disposable {
             this.post({ type: 'reveal', target: this.pendingReveal });
             this.pendingReveal = undefined;
           }
+          // A command may have asked for the dialog before the webview existed.
+          if (this.exportRequest) this.post({ type: 'export/items', request: this.exportRequest });
           this.sentPending = '';
           await this.pushPending();
           return;
         case 'level':
           this.level = msg.level;
           return;
+        case 'export/open':
+          return await vscode.commands.executeCommand('harness.export.open', {
+            kind: 'design',
+            workspace: this.workspaceId,
+            design: this.designId,
+          });        case 'export/pickPath':
+          return await vscode.commands.executeCommand('harness.export.pickPath', { requestId: msg.requestId });
+        case 'export/run':
+          // The webview only sends keys; the host resolves them against its own inventory.
+          return await vscode.commands.executeCommand('harness.export.run', { requestId: msg.requestId, keys: msg.keys, path: msg.path });
         case 'sync/apply': {
           const ref: DiagramRef = { workspace: this.workspaceId ?? '', design: this.designId ?? '', diagram: msg.diagram };
           return await this.applySync(msg.requestId, ref, msg.ids, msg.choices);

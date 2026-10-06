@@ -1,85 +1,115 @@
-import * as fs from 'node:fs/promises';
 import * as vscode from 'vscode';
-import { probe } from './manager';
+import { install, probe } from './manager';
+import { readTblsConfig } from './config';
+import { whichTbls, probeTblsVersion, type TblsVersionInfo } from './probeVersion';
 
-const CONFIG_KEY = 'harness.tblsPath';
-const DOWNLOAD_BASE_URL_KEY = 'harness.tblsDownloadBaseUrl';
-const VERSION_KEY = 'harness.tblsVersion';
-const AUTO_DOWNLOAD_KEY = 'harness.tblsAutoDownload';
+export type TblsResolveReason =
+  /** The bundled binary is needed but not installed yet. */
+  | 'missing-bundled'
+  /** Downloading the bundled binary failed. */
+  | 'download-failed'
+  /** `harness.tblsPath` points at a path that doesn't exist. */
+  | 'bad-path'
+  /** `harness.tblsPath` is a bare name that isn't on PATH. */
+  | 'not-on-path'
+  /** The path exists but running it failed. */
+  | 'not-executable';
 
-/** Reads the raw user-configured path; `""` means "use bundled/downloaded version". */
-export function getConfiguredTblsPath(config: vscode.WorkspaceConfiguration): string {
-  return config.get<string>(CONFIG_KEY, 'tbls');
+export class TblsResolveError extends Error {
+  constructor(
+    public readonly reason: TblsResolveReason,
+    message?: string,
+  ) {
+    super(message ?? reason);
+    this.name = 'TblsResolveError';
+  }
 }
 
 export interface ResolveOptions {
   /** Skip the bundled/download path check (used while installing). */
   skipBundled?: boolean;
-  /** Bypass auto-download; just resolve what's there. */
+  /** Bypass auto-download; just report what's there. */
   skipDownload?: boolean;
-  /** Extension version used as fallback target version. */
-  extensionVersion: string;
+}
+
+export interface ResolvedTbls {
+  /** The path to hand to `execFile`. */
+  path: string;
+  /** Where it came from. */
+  source: 'user-configured' | 'bundled';
+  /** Version reported by `--version`, when we probed it. */
+  version?: string;
+  /** The binary can actually run. */
+  verified: boolean;
 }
 
 /**
- * Resolves the tbls binary path to use.
+ * Resolves which tbls to run.
  *
- *   1. If `harness.tblsPath` is set (non-empty) AND it points to an existing file → use it.
- *      - If it doesn't exist (and looks like a name, not a path) → return as-is so the
- *        runner can surface a clear "找不到 tbls" error.
- *   2. Otherwise → use bundled/downloaded version from `<globalStorage>/bin/`.
- *   3. If nothing is installed and `harness.tblsAutoDownload !== false` → kick off a download
- *      and wait. If download fails, throw — the caller decides what to show.
+ *  1. `harness.tblsPath` set:
+ *     - looks like a path → must exist, be a file, and run; otherwise a `TblsResolveError`
+ *       explaining exactly what is wrong (no more "trust it and fail later at execFile").
+ *     - looks like a bare name → resolved through PATH, with a clear error when absent.
+ *  2. Otherwise the bundled copy under `<globalStorage>/bin/`, downloading it if allowed.
  */
-export async function resolveTblsPath(
-  context: vscode.ExtensionContext,
-  configured: string | undefined,
-  options: ResolveOptions,
-): Promise<string> {
-  const config = vscode.workspace.getConfiguration('harness');
-  const configuredPath = (configured ?? getConfiguredTblsPath(config)).trim();
+export async function resolveTbls(context: vscode.ExtensionContext, options: ResolveOptions = {}): Promise<ResolvedTbls> {
+  const config = readTblsConfig();
 
-  if (configuredPath) {
-    if (await looksLikeFile(configuredPath)) return configuredPath;
-    // Looks like a PATH-style name; trust it and let the runner surface errors.
-    return configuredPath;
+  if (config.tblsPath) {
+    if (looksLikePath(config.tblsPath)) {
+      const info = await probeTblsVersion(config.tblsPath);
+      if (!info.ok) {
+        const reason = info.reason === 'notFound' || info.reason === 'notAFile' ? 'bad-path' : 'not-executable';
+        throw new TblsResolveError(reason, info.error);
+      }
+      return { path: info.resolvedPath ?? config.tblsPath, source: 'user-configured', version: info.version, verified: true };
+    }
+    const onPath = await whichTbls(config.tblsPath);
+    if (!onPath) {
+      throw new TblsResolveError('not-on-path', `系统的 PATH 里找不到 “${config.tblsPath}”。请在连接页面点“选择本地文件…”指定完整路径。`);
+    }
+    const info = await probeTblsVersion(onPath);
+    if (!info.ok) throw new TblsResolveError('not-executable', info.error);
+    return { path: info.resolvedPath ?? onPath, source: 'user-configured', version: info.version, verified: true };
   }
 
-  if (options.skipBundled) return configuredPath || 'tbls';
+  if (options.skipBundled) throw new TblsResolveError('missing-bundled', '内置 tbls 不可用（已跳过）');
 
-  // Bundled/downloaded version
-  const version = (config.get<string>(VERSION_KEY, options.extensionVersion) || options.extensionVersion).replace(/^v/, '');
-  const baseUrl = config.get<string>(DOWNLOAD_BASE_URL_KEY, 'https://github.com/k1LoW/tbls/releases');
-
-  // Try the existing binary first.
-  const existing = await probe(context, version);
-  if (existing) return existing.fsPath;
+  const existing = await probe(context, config.version);
+  if (existing) {
+    const info = await probeTblsVersion(existing.fsPath);
+    if (info.ok) return { path: existing.fsPath, source: 'bundled', version: info.version, verified: true };
+  }
 
   if (options.skipDownload) throw new TblsResolveError('missing-bundled');
+  if (!config.autoDownload) throw new TblsResolveError('missing-bundled');
 
-  const autoDownload = config.get<boolean>(AUTO_DOWNLOAD_KEY, true);
-  if (!autoDownload) throw new TblsResolveError('missing-bundled');
-
-  const { install } = await import('./manager');
-  const installed = await install(context, version, baseUrl);
-  return installed.fsPath;
-}
-
-async function looksLikeFile(path: string): Promise<boolean> {
-  // Absolute / relative paths with separators are files; names without separators are PATH entries.
-  if (!path.includes('/') && !path.includes('\\')) return false;
   try {
-    const stat = await fs.stat(path);
-    return stat.isFile();
-  } catch {
-    return false;
+    const installed = await install(context, config.version, config.baseUrl);
+    const info = await probeTblsVersion(installed.fsPath);
+    return { path: installed.fsPath, source: 'bundled', version: info.version, verified: info.ok };
+  } catch (err) {
+    throw new TblsResolveError('download-failed', (err as Error).message);
   }
 }
 
-/** Error thrown by resolveTblsPath when the bundled binary is needed but unavailable. */
-export class TblsResolveError extends Error {
-  constructor(public readonly reason: 'missing-bundled' | 'download-failed', message?: string) {
-    super(message ?? reason);
-    this.name = 'TblsResolveError';
-  }
+/**
+ * Resolves to a plain path string.
+ *
+ * Kept for callers that only need the path; prefer {@link resolveTbls} when the version or the
+ * verification state is useful.
+ */
+export async function resolveTblsPath(context: vscode.ExtensionContext, options: ResolveOptions = {}): Promise<string> {
+  return (await resolveTbls(context, options)).path;
+}
+
+/** Probes whatever is currently configured without downloading or throwing. */
+export async function inspectConfiguredTbls(): Promise<TblsVersionInfo | undefined> {
+  const { tblsPath } = readTblsConfig();
+  if (!tblsPath) return undefined;
+  return probeTblsVersion(tblsPath);
+}
+
+function looksLikePath(p: string): boolean {
+  return p.includes('/') || p.includes('\\');
 }

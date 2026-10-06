@@ -5,6 +5,7 @@ import type { Harness } from './commands/common';
 import { registerDbCommands } from './commands/db';
 import { registerDesignCommands } from './commands/design';
 import { registerDiagramCommands } from './commands/diagram';
+import { registerExportCommands } from './commands/export';
 import { registerTblsCommands } from './commands/tbls';
 import { DiagramEditorProvider } from './diagram/diagramEditor';
 import { DiagramService } from './diagram/diagramService';
@@ -54,6 +55,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerDbCommands(h);
   registerTblsCommands(h);
   registerCanvasCommands(h);
+  registerExportCommands(h);
   console.log('[harness.activate] commands registered');
 
   const watcher = new StorageWatcher(storage, store);

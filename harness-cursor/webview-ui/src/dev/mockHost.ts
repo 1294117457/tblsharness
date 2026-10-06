@@ -15,7 +15,7 @@ import {
 } from '@shared/canvas';
 import { applyDesignOps, DesignOpError, type DesignDoc, type DesignOp } from '@shared/designOps';
 import { DIAGRAM_TYPES } from '@shared/diagram';
-import type { ComparisonData, DesignContext, DiagramData, HostMessage, SourceData, WebviewMessage, WorkspaceCatalog } from '@shared/protocol';
+import type { ComparisonData, DesignContext, DiagramData, ExportItem, ExportLevel, HostMessage, SourceData, WebviewMessage, WorkspaceCatalog } from '@shared/protocol';
 import type { TblsSchema } from '@shared/tbls';
 import { diffSchemas } from '../../../src/diff/diff';
 import { normalize } from '../../../src/model/normalize';
@@ -229,9 +229,45 @@ function handle(msg: WebviewMessage) {
     case 'clipboard/paste':
       reply(msg.requestId, '浏览器模拟模式下不支持粘贴');
       return;
+    case 'export/open':
+      sendExportItems();
+      return;
+    case 'export/pickPath':
+      // There is no native folder picker in a browser; echo a plausible path back.
+      send({ type: 'export/result', path: 'D:\\exports' });
+      return;
+    case 'export/run':
+      console.info(`[mock host] 导出 ${msg.keys.length} 项到 ${msg.path}`);
+      send({ type: 'export/result', message: `已导出到 ${msg.path}` });
+      return;
     default:
       console.info('[mock host] 浏览器模式下不支持：', msg);
   }
+}
+
+/** Mirrors what `collectExport` sends, so the dialog can be exercised in a browser. */
+function sendExportItems(): void {
+  const items: ExportItem[] = [];
+  const levels: ExportLevel[] = [{ id: undefined, name: designName, depth: 0 }];
+  for (const p of canvas.partitions) {
+    levels.push({ id: p.id, name: p.name, description: p.description, parent: p.parent, depth: 1 });
+  }
+  for (const t of designSourceData().schema?.tables ?? []) {
+    const node = canvas.nodes.find((n) => n.source === DESIGN_SOURCE && n.table === t.key);
+    items.push({ kind: 'design-table', key: t.key, rawName: t.rawName, comment: t.comment, partition: node?.partition, onCanvas: !!node, columns: t.columns.length });
+  }
+  for (const id of Object.keys(dbs)) {
+    for (const t of dbSourceData(id)?.schema?.tables ?? []) {
+      const node = canvas.nodes.find((n) => n.source === id && n.table === t.key);
+      items.push({ kind: 'db-table', source: id, key: t.key, rawName: t.rawName, comment: t.comment, partition: node?.partition, onCanvas: !!node, columns: t.columns.length });
+    }
+  }
+  for (const d of diagrams) {
+    items.push({ kind: 'diagram', id: d.id, key: `g:${d.id}`, name: d.name, type: d.type, partition: canvas.diagrams.find((x) => x.id === d.id)?.partition, onCanvas: canvas.diagrams.some((x) => x.id === d.id) });
+  }
+  const dbLabels: Record<string, string> = {};
+  for (const id of Object.keys(dbs)) dbLabels[id] = dbs[id].name;
+  send({ type: 'export/items', request: { requestId: 'mock-export', dbLabels, items, levels, suggestedPath: 'D:\\exports', designName, driverLabel: designSourceData().schema?.driver?.name } });
 }
 
 export function installMockHost(): void {

@@ -58,6 +58,48 @@ export interface ClipboardInfo {
   count: number;
 }
 
+// ── Export ─────────────────────────────────────────────────────────
+
+/** One thing that can be exported. The webview only ever sends back the `key` of these. */
+export type ExportItem =
+  | { kind: 'design-table'; key: string; rawName: string; comment?: string; partition?: string; onCanvas: boolean; columns: number }
+  | { kind: 'db-table'; source: string; key: string; rawName: string; comment?: string; partition?: string; onCanvas: boolean; columns: number }
+  | { kind: 'diagram'; id: string; key: string; name: string; type: DiagramType; partition?: string; onCanvas: boolean };
+
+/** One level of the canvas; `id` missing is the root canvas. */
+export interface ExportLevel {
+  id?: string;
+  name: string;
+  description?: string;
+  parent?: string;
+  depth: number;
+}
+
+/** Host→Web. Pushed when the export dialog opens. */
+export interface ExportRequest {
+  /**
+   * Identifies this dialog session. The host keeps the collected inventory under it, so the
+   * webview must echo it back verbatim — it must never invent its own id, or the host cannot
+   * match the selection to the snapshot it collected.
+   */
+  requestId: string;
+  /**
+   * Human-readable name of a database source for the UI only. Contains the host, so anything
+   * that the AI will see has to go through the id instead — this field is for display.
+   */
+  dbLabels?: Record<string, string>;
+  items: ExportItem[];
+  levels: ExportLevel[];
+  suggestedPath: string;
+  designName: string;
+  driverLabel?: string;
+}
+
+/** Stable identity of an item, used so the webview cannot rewrite names or sources. */
+export function exportKey(item: ExportItem): string {
+  return item.kind === 'diagram' ? `g:${item.id}` : item.kind === 'design-table' ? `d:${item.key}` : `b:${item.source}:${item.key}`;
+}
+
 export type HostMessage =
   | {
       type: 'init';
@@ -80,7 +122,10 @@ export type HostMessage =
   /** Select an item and zoom the canvas to it; without `item`, fit the whole canvas. `edit` puts the cursor in its editor. */
   | { type: 'reveal'; target: RevealTarget }
   | { type: 'clipboard'; clipboard?: ClipboardInfo }
-  | { type: 'pendingSync'; groups: SyncGroup[] };
+  | { type: 'pendingSync'; groups: SyncGroup[] }
+  /** The export dialog opens; the host answers a path pick and an export run this way. */
+  | { type: 'export/items'; request: ExportRequest }
+  | { type: 'export/result'; path?: string; message?: string; error?: string };
 
 export type WebviewMessage =
   | { type: 'ready' }
@@ -114,4 +159,10 @@ export type WebviewMessage =
   /** Dragging items into or out of a partition frame; coordinates are relative to the target frame. */
   | { type: 'items/move'; requestId: string; items: MoveItem[] }
   /** The current level (from selection / focus); the tree follows it. */
-  | { type: 'level'; level?: string };
+  | { type: 'level'; level?: string }
+  /** Open the export dialog for this design. The host answers with `export/items`, which carries the id to use. */
+  | { type: 'export/open' }
+  /** Let the user pick the export directory natively. */
+  | { type: 'export/pickPath'; requestId: string }
+  /** Write the export. `keys` are {@link exportKey} values, never whole items. */
+  | { type: 'export/run'; requestId: string; keys: string[]; path: string };

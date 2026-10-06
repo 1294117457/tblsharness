@@ -1,10 +1,10 @@
-import type { TblsResolveError } from '../tbls/resolver';
+import type { TblsResolveError, TblsResolveReason } from '../tbls/resolver';
 
 export interface FriendlyError {
   message: string;
   /** The original (already masked) tbls output, shown under "详细信息". */
   detail?: string;
-  action?: 'setTblsPath' | 'downloadTbls';
+  action?: 'setTblsPath' | 'downloadTbls' | 'testTbls';
 }
 
 const RULES: { match: RegExp; message: string }[] = [
@@ -36,22 +36,30 @@ export function friendlyTblsError(raw: string, reason?: 'notFound' | 'timeout' |
   return rule ? { message: rule.message, detail: raw } : { message: raw };
 }
 
+/** Fallback copy when a resolve error somehow carries no message. */
+const MISSING_REASON_TEXT: Record<TblsResolveReason, string> = {
+  'missing-bundled': 'Harness 还没有内置的 tbls。可以点“下载内置 tbls”，或指定一个本地的 tbls。',
+  'download-failed': 'Harness 内置的 tbls 下载失败。',
+  'bad-path': 'harness.tblsPath 指向的文件不存在，请重新选择。',
+  'not-on-path': 'PATH 里找不到这个 tbls，请指定完整路径。',
+  'not-executable': '这个 tbls 无法运行，请换一个文件。',
+};
+
 /**
- * Builds an error explaining that the bundled tbls binary is missing.
+ * Turns a resolve failure into actionable copy plus the button that fixes it.
  *
- *  - `error.reason === 'missing-bundled'` → the bundled version isn't installed yet (action: downloadTbls)
- *  - `error.reason === 'download-failed'` → the bundled install failed (action: downloadTbls)
+ * `bad-path` / `not-on-path` / `not-executable` all mean "the configured binary is wrong" →
+ * `setTblsPath`. `missing-bundled` / `download-failed` mean "we should fetch ours" →
+ * `downloadTbls`.
  */
 export function friendlyMissingTblsError(error: TblsResolveError): FriendlyError {
-  if (error.reason === 'download-failed') {
-    return {
-      message: `Harness 内置的 tbls 下载失败：${error.message}`,
-      detail: error.stack,
-      action: 'downloadTbls',
-    };
+  const text = error.message && error.message !== error.reason ? error.message : MISSING_REASON_TEXT[error.reason];
+  switch (error.reason) {
+    case 'download-failed':
+      return { message: `Harness 内置的 tbls 下载失败：${text}`, detail: error.stack, action: 'downloadTbls' };
+    case 'missing-bundled':
+      return { message: text, action: 'downloadTbls' };
+    default:
+      return { message: text, action: 'setTblsPath' };
   }
-  return {
-    message: 'Harness 还没有内置的 tbls。可以在设置里打开自动下载，或者手动指定一个本地的 tbls。',
-    action: 'downloadTbls',
-  };
 }

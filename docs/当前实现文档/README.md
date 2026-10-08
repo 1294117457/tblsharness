@@ -1,7 +1,7 @@
 # Harness 工程索引（当前实现）
 
 > 面向开发者和 AI agent 的快速上手索引。先读"一分钟概览"和"目录地图"，改功能时查"改什么去哪里"。
-> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-10-05（第三阶段第一步「导出给 AI」：左侧看板新增 ⬇ 导出，按设计画布分区导出目录树，供 AI 读取；见 `docs/step3/01导出/`）。
+> 代码根目录：`harness-cursor/`（下文路径均相对于它）。最后更新：2026-10-06（第三阶段第二步「看板去掉」：取消画布内左侧 `SourcePanel.vue`，功能并入侧边栏 `WorkspaceTreeProvider` —— `design` 下 4 段（设计表 / 设计图 / 数据库 / 分区画布），每个表 / 图 / db 表行有 inline `$(eye)` 切换 hidden，"⬇ 导出" inline 在 `design` 行；新增 5 个命令 `harness.db.addToDesign` / `harness.db.showOnCanvas` / `harness.table.toggleHidden` / `harness.diagram.toggleHidden` / `harness.dbTable.toggleHidden`；见 `docs/step3/02看板去掉/`）。
 
 ## 1. 一分钟概览
 
@@ -14,9 +14,9 @@ Harness 是一个 Cursor / VS Code 插件，用 **tbls 的 JSON 格式**作为�
 - **对比（diff）**：设计画布 vs 数据库快照，差异标在画布上，可"确认为有意偏差"。对比数据按设计+数据库存储在设计内部的 `comparisons.json`。
 - **设计图（diagram）**：设计画布下的 Mermaid 图（ER 图 / 状态图 / 时序图 / 流程图 / 数据流图），存为 `design/<designN>/diagrams/<diagramN>.md`。**AI 只写 Mermaid**；ER 图和表结构不一致时，由用户在右侧"差异/待同步"面板里勾选确认后才写入 `schema.json`，其他类型只预览不同步。
 - 画布上的设计图显示为 **Mermaid 卡片**（所有类型，含 ER 图；ER 图和表结构不一致时卡片上有"待同步 N"徽标）。
-- **导出给 AI（export）**：把当前设计画布按**分区画布层级**导出成目录树（`README.md` + `manifest.json` + 每表一个 `.md` + 设计图原样拷贝），产物只含数据模型、不含任何连接信息，专门喂给 AI。左侧看板标题栏有「⬇ 导出」按钮，弹窗里按分区树勾选内容并选路径。
+- **导出给 AI（export）**：把当前设计画布按**分区画布层级**导出成目录树（`README.md` + `manifest.json` + 每表一个 `.md` + 设计图原样拷贝），产物只含数据模型、不含任何连接信息，专门喂给 AI。**入口**：侧边栏 `design` 行右侧 inline `$(export)` 按钮（`harness.export.open`）；命令面板也保留。Webview 不可用时（纯命令调用）退化为 quickpick 兜底。
 
-侧边栏树：工作区 → 两个分组 **设计画布 / 数据库**；每个设计画布、每个分区画布下都是 **设计表**（本层的表 → 字段）/ **设计图** / **分区画布**（递归）。点击设计画布 = 打开编辑器；点击分区画布 / 设计表 / 设计图 = 在画布中选中并聚焦（`reveal`）。树支持多选、`Ctrl+C / X / V`、右键复制 / 剪切 / 粘贴、拖拽（= 剪切到目标层）。
+侧边栏树：工作区 → 设计画布（**design 节点直接展开，不再有"设计画布/数据库"两个顶层分组**）；每个 design 下 4 段：**设计表**（本层 N，含列展开）/ **设计图**（本层 N）/ **数据库**（design `meta.sources` 引用，展开为表）/ **分区画布**（递归）。设计表 / 设计图 / db 表行有 inline `$(eye)` 按钮切换 hidden；`design` 行有 inline `$(export)` 触发导出弹窗。点击 design = 打开编辑器；点击分区画布 / 设计表 / 设计图 / db 表 = 在画布中选中并聚焦（`reveal`）。树支持多选、`Ctrl+C / X / V`、右键复制 / 剪切 / 粘贴、拖拽（= 剪切到目标层）。
 
 硬性原则：
 
@@ -169,7 +169,6 @@ harness-cursor/
 │  │  ├─ DbTableInspector.vue 数据库表只读结构视图：来源、快照时间、注释、字段（类型/标志/FK 指向）、索引、外键、被引用、复制按钮、从画布移除
 │  │  ├─ LevelContents.vue 层内内容列表（分区框、设计表、设计图、数据库表、便签），点击 = reveal
 │  │  ├─ DiffPanel.vue     差异列表
-│  │  ├─ SourcePanel.vue   ★ 数据源面板（只显示当前层）：设计表（本层 N，全部显示）、设计图（本层 N，全部显示）、每个数据库（显示全部表、⟳、✕）+ 添加数据库 + **⬇ 导出**（emit `export`）
 │  │  ├─ ExportDialog.vue  ★ 导出弹窗：按分区树勾选（设计表 / 设计图 / 数据表，预勾选画布上可见的，支持全选/反选）、搜索过滤、路径选择 + 「另存为」、体积预估、执行导出；
 │  │  │                 通过 props 接收 `ExportRequest`，emit `export/pickPath` / `export/run`；**只上报 key（d:<key> / b:<source>:<key> / g:<id>），不传表结构和路径**（webview 不可信）
 │  │  ├─ ContextMenu.vue   右键菜单
@@ -372,7 +371,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 
 ### 5.10 导出给 AI
 
-- **入口**：左侧数据源看板标题栏「+ 添加数据库」旁的「⬇ 导出」→ `harness.export.open`（命令面板里也有）。Webview 不可用时（纯命令调用）退化为 quickpick 兜底。
+- **入口**：侧边栏 `design` 行 inline `$(export)` → `harness.export.open`（命令面板里也有）。Webview 不可用时（纯命令调用）退化为 quickpick 兜底。
 - **收集**：`collectExport()`（`src/export/collect.ts`）从 `ModelStore` 取设计表和每个 db 快照的表，从 `h.canvases.layout()` 取每项落在哪一层分区，从 `h.diagrams.list()` 取设计图。产出的 `ExportItem` **只有标识信息**（kind / key / rawName / comment / 分区 / 是否在画布上 / 字段数），不含字段明细。
 - **勾选**：弹窗 `ExportDialog.vue` 按分区树展示，**默认勾选画布上可见的**，但可以自由增删（含勾选没上画布的）。数据表按 source 分组。
 - **生成**：webview 只回传 key 列表 → `buildExport()`（纯函数）算出全部相对路径和 Markdown → `writeExport()` 落盘。
@@ -430,7 +429,7 @@ Webview `table/copyToDesign`（source: dbId, tables: string[]）→ `CanvasSessi
 | Web→Host | `sync/apply` / `sync/ignore` | 把勾选的同步项写入表结构 / 忽略或恢复，需要 reply |
 | Host→Web | `export/items` | 打开导出弹窗时发可导出清单：ExportRequest{ **requestId**, items[], levels[], suggestedPath, designName, driverLabel? }。`requestId` 由主进程生成，webview 必须原样回传 |
 | Host→Web | `export/result` | 导出结果：{path?}（选路径成功）/ {message?} / {error?} |
-| Web→Host | `export/open` | 请求打开导出弹窗（看板「⬇ 导出」按钮）。**不带 requestId** —— id 由主进程收集完清单后才生成 |
+| Web→Host | `export/open` | 请求打开导出弹窗（侧边栏 `design` 行 inline `$(export)` 按钮 / 命令面板）。**不带 requestId** —— id 由主进程收集完清单后才生成 |
 | Web→Host | `export/pickPath` | 请求弹系统目录选择框（支持"另存为"） |
 | Web→Host | `export/run` | 执行导出：{keys: string[], path}（**requestId 取自 `ExportRequest`**）；**只传 key，不传表结构** |
 

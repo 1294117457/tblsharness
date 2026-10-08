@@ -17,14 +17,13 @@ import type { RelationKind } from '@shared/model';
 import { effectiveNamespace, namespaceLabel, qualify } from '@shared/namespace';
 import type { SyncGroup } from '@shared/sync';
 import { nextDefaultName } from '@shared/workspace';
-import { buildView, levelContent, TABLE_HANDLE, type TableView } from './canvas/viewModel';
+import { buildView, TABLE_HANDLE, type TableView } from './canvas/viewModel';
 import { NODE_WIDTH, PART_HEADER, PART_PAD, type Position } from './canvas/layout';
 import CanvasView from './components/CanvasView.vue';
 import ContextMenu, { type MenuItem } from './components/ContextMenu.vue';
 import DiffPanel from './components/DiffPanel.vue';
 import ExportDialog from './components/ExportDialog.vue';
 import Inspector from './components/Inspector.vue';
-import SourcePanel from './components/SourcePanel.vue';
 import SyncPanel from './components/SyncPanel.vue';
 import {
   applySync,
@@ -54,7 +53,6 @@ import {
 import { getState, onHostMessage, post, setState } from './vscode';
 
 const view = computed(() => buildView(canvas.value, state.sources, state.comparison, state.diagrams));
-const levelLists = computed(() => levelContent(view.value, state.level));
 const flow = ref<InstanceType<typeof CanvasView>>();
 /** Typed handle on the dialog so the host's `export/result` can be handed to it. */
 const exportDialog = useTemplateRef<InstanceType<typeof ExportDialog>>('exportDialog');
@@ -63,13 +61,11 @@ const menu = ref<{ x: number; y: number; title?: string; items: MenuItem[] }>();
 const pointer = { x: 0, y: 0, overCanvas: false };
 
 interface PanelState {
-  leftCollapsed?: boolean;
   rightCollapsed?: boolean;
 }
 const saved = getState<PanelState>() ?? {};
-const leftCollapsed = ref(!!saved.leftCollapsed);
 const rightCollapsed = ref(!!saved.rightCollapsed);
-watch([leftCollapsed, rightCollapsed], ([l, r]) => setState<PanelState>({ ...(getState<PanelState>() ?? {}), leftCollapsed: l, rightCollapsed: r }));
+watch(rightCollapsed, (r) => setState<PanelState>({ ...(getState<PanelState>() ?? {}), rightCollapsed: r }));
 
 const hasDesignSchema = computed(() => !!state.sources[DESIGN_SOURCE]?.schema);
 const dbSources = computed(() => Object.entries(state.sources).filter(([key]) => key !== DESIGN_SOURCE));
@@ -225,11 +221,6 @@ function addDbTables(source: string, tables: string[], near?: string) {
   if (edit.length) editCanvas(tables.length > 1 ? `添加 ${tables.length} 张表到画布` : `添加表 ${tables[0]} 到画布`, edit);
   if (moves.length) void moveItems(moves);
   if (!near && tables.length === 1) focusNode(nodeId(source, tables[0]));
-}
-
-function removeDbTables(source: string, tables: string[]) {
-  const ids = tables.map((t) => nodeId(source, t));
-  if (ids.length) editCanvas(ids.length > 1 ? `从画布移除 ${ids.length} 张表` : '从画布移除', [{ op: 'nodes.remove', ids }]);
 }
 
 // ── Selection helpers: hide / delete / clipboard ──────────────────
@@ -697,21 +688,6 @@ onUnmounted(() => {
       </header>
 
       <main class="body">
-        <aside v-if="leftCollapsed" class="rail left-rail" title="展开数据源面板" @click="leftCollapsed = false">
-          <span class="rail-icon">»</span>
-          <span class="rail-text">数据源</span>
-        </aside>
-        <aside v-else class="left">
-          <SourcePanel
-            :level="levelLists"
-            @add-db-tables="addDbTables"
-            @remove-db-tables="removeDbTables"
-            @create-table="createTable()"
-            @create-diagram="menu = { x: pointer.x, y: pointer.y, title: '新建设计图（放在当前层）', items: diagramMenuItems(state.level) }"
-            @export="post({ type: 'export/open' })"
-            @collapse="leftCollapsed = true"
-          />
-        </aside>
         <section class="center-pane">
           <CanvasView
             ref="flow"

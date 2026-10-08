@@ -20,11 +20,26 @@ export interface Harness {
   diagrams: DiagramService;
 }
 
+/** What reveal can be called with. A full `TreeNode` is fine, but db creation sites may not
+ * know the parent design, so we accept a partial shape that only requires the identifying fields. */
+export type RevealableNode =
+  | TreeNode
+  | { kind: 'db'; workspace: string; id: string; design?: string }
+  | { kind: 'workspace'; workspace: string }
+  | { kind: 'design'; workspace: string; id: string }
+  | { kind: 'diagram'; workspace: string; design: string; id: string; partition?: string };
+
 /** Selects a freshly created node; waits for the debounced tree refresh first so the node exists. */
-export async function revealInTree(h: Harness, node: TreeNode): Promise<void> {
+export async function revealInTree(h: Harness, node: RevealableNode): Promise<void> {
   await new Promise((r) => setTimeout(r, 250));
+  // Db nodes now live under a design; if the caller doesn't have a design, just refresh the
+  // workspace subtree (the user will see the db once they expand a design that references it).
+  if (node.kind === 'db' && !node.design) {
+    h.tree.refresh();
+    return;
+  }
   try {
-    await h.treeView.reveal(node, { select: true, focus: false, expand: node.kind === 'workspace' ? 2 : false });
+    await h.treeView.reveal(node as TreeNode, { select: true, focus: false, expand: node.kind === 'workspace' ? 2 : false });
   } catch {
     // The view may be hidden or the node already gone; selection is only a convenience.
   }

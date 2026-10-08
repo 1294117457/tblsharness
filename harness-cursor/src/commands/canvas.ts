@@ -127,6 +127,77 @@ export function registerCanvasCommands(h: Harness): void {
         : required(await vscode.window.showQuickPick(matches.map((m) => ({ label: m.name, description: m.design, ...m })), { title: '在哪个设计画布中定位？' })));
     await h.canvases.revealTable(ws.id, target.design, ref, table);
   });
+
+  /** Toggle a design table's `hidden` flag — operates on the layout, not on the schema. */
+  register(h, 'harness.table.toggleHidden', async (arg) => {
+    if (!arg?.workspace || !arg.design || !arg.table?.key) throw new Error('请在侧边栏中选择一张设计表');
+    const layout = await h.canvases.layout(arg.workspace, arg.design);
+    const node = layout.nodes.find((n) => n.source === DESIGN_SOURCE && n.table === arg.table!.key);
+    if (!node) throw new Error('这张表还没在画布上，先加到画布再切换显示');
+    await h.canvases.editLayout(arg.workspace, arg.design, node.hidden ? '显示设计表' : '隐藏设计表', [{ op: 'nodes.put', nodes: [{ ...node, hidden: !node.hidden }] }]);
+  });
+
+  /** Toggle a diagram's `hidden` flag. */
+  register(h, 'harness.diagram.toggleHidden', async (arg) => {
+    if (!arg?.workspace || !arg.design || !arg.id) throw new Error('请在侧边栏中选择一张设计图');
+    const layout = await h.canvases.layout(arg.workspace, arg.design);
+    const d = layout.diagrams.find((x) => x.id === arg.id);
+    if (!d) throw new Error('设计图不在画布里');
+    await h.canvases.editLayout(arg.workspace, arg.design, d.hidden ? '显示设计图' : '隐藏设计图', [{ op: 'diagrams.put', diagrams: [{ ...d, hidden: !d.hidden }] }]);
+  });
+
+  /** Toggle a database table's `hidden` flag. */
+  register(h, 'harness.dbTable.toggleHidden', async (arg) => {
+    if (!arg?.workspace || !arg.design || !arg.id || !arg.table?.key) throw new Error('请在侧边栏中选择一张数据库表');
+    const layout = await h.canvases.layout(arg.workspace, arg.design);
+    const node = layout.nodes.find((n) => n.source === arg.id && n.table === arg.table!.key);
+    if (!node) throw new Error('这张表还没在画布上');
+    await h.canvases.editLayout(arg.workspace, arg.design, node.hidden ? '显示数据库表' : '隐藏数据库表', [{ op: 'nodes.put', nodes: [{ ...node, hidden: !node.hidden }] }]);
+  });
+
+  /** Add a database table to the design canvas (root level) without converting it to a design table. */
+  register(h, 'harness.db.showOnCanvas', async (arg) => {
+    if (!arg?.workspace || !arg.design || !arg.id || !arg.table?.key) throw new Error('请在侧边栏中选择一张数据库表');
+    const layout = await h.canvases.layout(arg.workspace, arg.design);
+    if (layout.nodes.some((n) => n.source === arg.id && n.table === arg.table!.key)) {
+      // Already on the canvas: focus it instead of adding a duplicate.
+      await h.canvases.revealTable(arg.workspace, arg.design, arg.id, arg.table.key);
+      return;
+    }
+    const root = layout.nodes.filter((n) => !n.partition);
+    const x = root.length ? Math.max(...root.map((n) => n.x)) + 320 : 0;
+    await h.canvases.editLayout(arg.workspace, arg.design, `添加表 ${arg.table.key}`, [{ op: 'nodes.put', nodes: [{ source: arg.id, table: arg.table.key, x, y: 0 }] }]);
+    await h.canvases.revealTable(arg.workspace, arg.design, arg.id, arg.table.key);
+  });
+
+  /** Add a database to a design's `meta.sources` (does not place any table on the canvas). */
+  register(h, 'harness.db.addToDesign', async (arg) => {
+    if (!arg?.workspace || !arg.id) throw new Error('请在侧边栏中选择一个数据库');
+    const { design } = await pickSourceIdOptional(h, arg.workspace, 'design');
+    if (!design) throw new Error('请先新建一个设计画布');
+    const d = h.storage.workspace(arg.workspace).design(design);
+    const meta = await d.readMeta();
+    if (meta.sources?.includes(arg.id)) {
+      vscode.window.showInformationMessage(`数据库已经在设计画布里了`);
+      return;
+    }
+    await d.writeMeta({ ...meta, sources: [...(meta.sources ?? []), arg.id] });
+    h.store.invalidate({ workspace: arg.workspace, kind: 'design', id: design });
+    // Reopen any active canvas for this design so the new db shows up.
+    void h.canvases.open(arg.workspace, design);
+  });
+}
+
+/** Like `pickSourceId` but returns `undefined` for an empty list instead of throwing — used by db.addToDesign
+ * which surfaces the "no design" condition as its own error message. */
+async function pickSourceIdOptional(h: Harness, workspace: string, kind: SourceKind): Promise<{ design?: string; ref?: string }> {
+  const ids = kind === 'design' ? await h.storage.workspace(workspace).designIds() : await h.storage.workspace(workspace).dbIds();
+  if (!ids.length) return {};
+  if (ids.length === 1) return kind === 'design' ? { design: ids[0] } : { ref: ids[0] };
+  const ws = h.storage.workspace(workspace);
+  const items = await Promise.all(ids.map(async (id) => ({ label: kind === 'design' ? (await ws.design(id).readMeta()).name : await h.store.dbName(workspace, id), description: id, id })));
+  const pick = required(await vscode.window.showQuickPick(items, { title: kind === 'design' ? '选择设计画布' : '选择数据库' }));
+  return kind === 'design' ? { design: pick.id } : { ref: pick.id };
 }
 
 /** The level a command argument points at: a partition node, or any node carrying `partition`. */

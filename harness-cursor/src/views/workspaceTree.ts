@@ -9,28 +9,25 @@ import { effectiveNamespace, namespaceLabel, shortName } from '../shared/namespa
 import { driverLabel, type SourceKind } from '../shared/workspace';
 import type { HarnessStorage } from '../workspace/storage';
 
-type Group = 'design' | 'db';
-export type LevelGroup = 'tables' | 'diagrams' | 'partitions';
-
-/** Drivers with a brand icon under media/db (`<driver>-light.svg` / `<driver>-dark.svg`). */
-const DRIVER_ICONS = new Set<ConnectionDriver>(['postgres', 'mysql', 'mariadb', 'sqlserver', 'sqlite', 'clickhouse', 'redshift']);
+/**
+ * Sub-groups of a design (and partitions). The design root also has `db`; partitions do not.
+ */
+export type DesignGroup = 'tables' | 'diagrams' | 'db' | 'partitions';
 
 /**
  * A "level" is the root design canvas (`partition` undefined) or one of its nested partition canvases.
- * Every level shows the same three groups: 设计表, 设计图, 分区画布.
+ * The design root shows four groups (tables / diagrams / db / partitions); partitions show three (no db).
  */
 export type TreeNode =
   | { kind: 'empty'; workspace: '' }
   | { kind: 'workspace'; workspace: string }
-  | { kind: 'group'; workspace: string; group: Group }
-  | { kind: 'placeholder'; workspace: string; group: Group }
   | { kind: 'design'; workspace: string; id: string }
-  | { kind: 'partition'; workspace: string; design: string; id: string }
-  | { kind: 'levelGroup'; workspace: string; design: string; partition?: string; group: LevelGroup }
+  | { kind: 'partition'; workspace: string; design: string; id: string; parent?: string }
+  | { kind: 'levelGroup'; workspace: string; design: string; partition?: string; group: DesignGroup }
   | { kind: 'diagram'; workspace: string; design: string; id: string; partition?: string }
-  | { kind: 'db'; workspace: string; id: string }
+  | { kind: 'db'; workspace: string; design: string; id: string }
   /** `id` is the design or db ID; `partition` is the level a design table sits in. */
-  | { kind: 'table'; workspace: string; source: SourceKind; id: string; table: NTable; fks: Set<string>; partition?: string }
+  | { kind: 'table'; workspace: string; source: SourceKind; id: string; design: string; table: NTable; fks: Set<string>; partition?: string }
   | { kind: 'column'; workspace: string; source: SourceKind; id: string; table: string; column: NColumn; fk: boolean };
 
 const DIAGRAM_ICONS: Record<DiagramType, string> = {
@@ -41,14 +38,18 @@ const DIAGRAM_ICONS: Record<DiagramType, string> = {
   dataflow: 'arrow-both',
 };
 
-const GROUP_INFO: Record<Group, { label: string; icon: string; empty: string; command: string }> = {
-  design: { label: '设计画布', icon: 'edit', empty: '还没有设计画布，点击新建', command: 'harness.design.create' },
-  db: { label: '数据库', icon: 'database', empty: '还没有数据库，点击添加', command: 'harness.db.create' },
-};
+/** Drivers with a brand icon under media/db (`<driver>-light.svg` / `<driver>-dark.svg`). */
+const DRIVER_ICONS = new Set<ConnectionDriver>(['postgres', 'mysql', 'mariadb', 'sqlserver', 'sqlite', 'clickhouse', 'redshift']);
 
-const LEVEL_GROUPS: Record<LevelGroup, { label: string; icon: string; tooltip: string }> = {
+/** Groups that exist on a partition (no `db`; that is design-root only). */
+const PARTITION_GROUPS = ['tables', 'diagrams', 'partitions'] as const satisfies readonly DesignGroup[];
+/** Groups that exist on the design root, in display order. */
+const DESIGN_ROOT_GROUPS = ['tables', 'diagrams', 'db', 'partitions'] as const satisfies readonly DesignGroup[];
+
+const GROUP_INFO: Record<DesignGroup, { label: string; icon: string; tooltip: string }> = {
   tables: { label: '设计表', icon: 'table', tooltip: '这一层画布上的设计表（tbls JSON）' },
   diagrams: { label: '设计图', icon: 'graph', tooltip: 'Mermaid 设计图：ER 图、状态图、时序图、流程图、数据流图。ER 图可以确认后同步到表结构。' },
+  db: { label: '数据库', icon: 'database', tooltip: '这个设计画布引用的数据库，每个 db 下的表可以加到画布上做对比' },
   partitions: { label: '分区画布', icon: 'layout', tooltip: '嵌套在这一层里的分区画布，结构和设计画布一样' },
 };
 
@@ -116,7 +117,11 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
     }
   }
 
-  /** Design tables, diagrams and child partitions of one level. Tables and diagrams without a layout entry sit at the root. */
+  /**
+   * Design tables, diagrams and child partitions of one level. Tables and diagrams without a layout entry sit at the root.
+   * When `partition` is `undefined` (i.e. the design root) this also returns the list of database sources
+   * the design references, because the `db` group is design-root only.
+   */
   private async levelContents(workspace: string, design: string, partition: string | undefined) {
     const [layout, loaded, diagramIds] = await Promise.all([
       this.layout(workspace, design),
@@ -125,6 +130,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
     ]);
     const tablePlace = new Map(layout.nodes.filter((n) => n.source === DESIGN_SOURCE).map((n) => [n.table, n]));
     const diagramPlace = new Map(layout.diagrams.map((d) => [d.id, d]));
+    const sources = partition === undefined ? (await this.storage.workspace(workspace).design(design).readMeta()).sources ?? [] : undefined;
     return {
       layout,
       schema: loaded.schema,
@@ -133,6 +139,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
       diagrams: diagramIds.filter((id) => diagramPlace.get(id)?.partition === partition),
       hiddenDiagrams: new Set(layout.diagrams.filter((d) => d.hidden).map((d) => d.id)),
       partitions: layout.partitions.filter((p) => p.parent === partition),
+      sources,
     };
   }
 
@@ -164,24 +171,6 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         item.tooltip = `${meta.name}（ID：${node.workspace}）${meta.description ? `\n${meta.description}` : ''}`;
         item.iconPath = new vscode.ThemeIcon('folder-library');
         item.contextValue = 'workspace';
-        return item;
-      }
-      case 'group': {
-        const info = GROUP_INFO[node.group];
-        const item = new vscode.TreeItem(info.label, vscode.TreeItemCollapsibleState.Expanded);
-        item.id = `ws:${node.workspace}:${node.group}`;
-        const count = await this.groupIds(node.workspace, node.group);
-        item.description = count.length ? String(count.length) : undefined;
-        item.iconPath = new vscode.ThemeIcon(info.icon);
-        item.contextValue = `group.${node.group}`;
-        return item;
-      }
-      case 'placeholder': {
-        const info = GROUP_INFO[node.group];
-        const item = new vscode.TreeItem(info.empty, vscode.TreeItemCollapsibleState.None);
-        item.iconPath = new vscode.ThemeIcon('add');
-        item.contextValue = 'placeholder';
-        item.command = { command: info.command, title: info.empty, arguments: [{ workspace: node.workspace }] };
         return item;
       }
       case 'design': {
@@ -218,9 +207,9 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         return item;
       }
       case 'levelGroup': {
-        const info = LEVEL_GROUPS[node.group];
+        const info = GROUP_INFO[node.group];
         const c = await this.levelContents(node.workspace, node.design, node.partition);
-        const count = node.group === 'tables' ? c.tables.length : node.group === 'diagrams' ? c.diagrams.length : c.partitions.length;
+        const count = node.group === 'tables' ? c.tables.length : node.group === 'diagrams' ? c.diagrams.length : node.group === 'db' ? c.sources?.length ?? 0 : c.partitions.length;
         const item = new vscode.TreeItem(info.label, count ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
         item.id = `ws:${node.workspace}:design:${node.design}:${node.partition ?? 'root'}:${node.group}`;
         item.description = count ? String(count) : undefined;
@@ -250,7 +239,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
         ]);
         const hasSnapshot = !!loaded.schema;
         const item = new vscode.TreeItem(loaded.name, hasSnapshot ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
-        item.id = `ws:${node.workspace}:db:${node.id}`;
+        item.id = `ws:${node.workspace}:design:${node.design}:db:${node.id}`;
         const error = this.syncErrors.get(`${node.workspace}/${node.id}`) ?? loaded.error;
         const connected = meta.connection.kind === 'secret' && !!dsn;
         const driver = meta.connection.kind === 'secret' ? meta.connection.driver : undefined;
@@ -278,6 +267,10 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
           label = shortName(effectiveNamespace(layout, node.partition), t.key);
           if (label !== t.key) extra.push(t.key);
           if (layout.nodes.some((n) => n.source === DESIGN_SOURCE && n.table === t.key && n.hidden)) extra.push('已隐藏');
+        } else {
+          // db tables: `onCanvas` means there is a layout entry for this node
+          const layout = await this.layout(node.workspace, node.design);
+          if (layout.nodes.some((n) => n.source === node.id && n.table === t.key && n.hidden)) extra.push('已隐藏');
         }
         const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
         item.id = `ws:${node.workspace}:${node.source}:${node.id}:t:${t.key}`;
@@ -322,30 +315,33 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
       return named.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true })).map((w) => ({ kind: 'workspace', workspace: w.id }));
     }
     switch (node.kind) {
-      case 'workspace':
-        return (['design', 'db'] as Group[]).map((group) => ({ kind: 'group', workspace: node.workspace, group }));
-      case 'group': {
-        const ids = await this.groupIds(node.workspace, node.group);
-        if (!ids.length) return [{ kind: 'placeholder', workspace: node.workspace, group: node.group }];
-        if (node.group === 'design') return ids.map((id) => ({ kind: 'design', workspace: node.workspace, id }));
-        return ids.map((id) => ({ kind: 'db', workspace: node.workspace, id }));
+      case 'workspace': {
+        const ids = (await this.storage.workspace(node.workspace).designIds()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+        return ids.map((id) => ({ kind: 'design', workspace: node.workspace, id }));
       }
-      case 'design':
-        return levelGroups(node.workspace, node.id, undefined);
+      case 'design': {
+        // Design root: tables / diagrams / db (from meta.sources) / partitions
+        return DESIGN_ROOT_GROUPS.map((group) => ({ kind: 'levelGroup', workspace: node.workspace, design: node.id, partition: undefined, group }));
+      }
       case 'partition':
-        return levelGroups(node.workspace, node.design, node.id);
+        // Partition: no `db` group (meta.sources is design-level)
+        return PARTITION_GROUPS.map((group) => ({ kind: 'levelGroup', workspace: node.workspace, design: node.design, partition: node.id, group }));
       case 'levelGroup': {
         const c = await this.levelContents(node.workspace, node.design, node.partition);
-        if (node.group === 'partitions') return c.partitions.map((p) => ({ kind: 'partition', workspace: node.workspace, design: node.design, id: p.id }));
+        if (node.group === 'partitions') return c.partitions.map((p) => ({ kind: 'partition', workspace: node.workspace, design: node.design, id: p.id, parent: p.parent }));
         if (node.group === 'diagrams') return c.diagrams.map((id) => ({ kind: 'diagram', workspace: node.workspace, design: node.design, id, partition: node.partition }));
+        if (node.group === 'db') {
+          if (!c.sources?.length) return [];
+          return c.sources.map((dbId) => ({ kind: 'db', workspace: node.workspace, design: node.design, id: dbId }));
+        }
         const fks = foreignKeys(c.schema?.relations ?? []);
-        return c.tables.map((table) => ({ kind: 'table', workspace: node.workspace, source: 'design', id: node.design, table, fks: fks.get(table.key) ?? new Set(), partition: node.partition }));
+        return c.tables.map((table) => ({ kind: 'table', workspace: node.workspace, source: 'design', id: node.design, design: node.design, table, fks: fks.get(table.key) ?? new Set(), partition: node.partition }));
       }
       case 'db': {
         const schema = (await this.store.source(node.workspace, 'db', node.id)).schema;
         if (!schema) return [];
         const fks = foreignKeys(schema.relations);
-        return schema.tables.map((table) => ({ kind: 'table', workspace: node.workspace, source: 'db', id: node.id, table, fks: fks.get(table.key) ?? new Set() }));
+        return schema.tables.map((table) => ({ kind: 'table', workspace: node.workspace, source: 'db', id: node.id, design: node.design, table, fks: fks.get(table.key) ?? new Set() }));
       }
       case 'table':
         return node.table.columns.map((column) => ({
@@ -362,32 +358,31 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
     }
   }
 
-  /** Needed by TreeView.reveal; resolves synchronously for the nodes we reveal (workspace, group, source). */
+  /** Needed by TreeView.reveal; resolves synchronously for the nodes we reveal (workspace, design, db, partition). */
   getParent(node: TreeNode): TreeNode | undefined {
     switch (node.kind) {
       case 'workspace':
         return undefined;
-      case 'group':
-      case 'placeholder':
-        return { kind: 'workspace', workspace: node.workspace };
       case 'design':
-        return { kind: 'group', workspace: node.workspace, group: 'design' };
+        return { kind: 'workspace', workspace: node.workspace };
       case 'db':
-        return { kind: 'group', workspace: node.workspace, group: 'db' };
+        return { kind: 'levelGroup', workspace: node.workspace, design: node.design, partition: undefined, group: 'db' };
       case 'levelGroup':
-        return node.partition ? { kind: 'partition', workspace: node.workspace, design: node.design, id: node.partition } : { kind: 'design', workspace: node.workspace, id: node.design };
+        return node.partition
+          ? { kind: 'partition', workspace: node.workspace, design: node.design, id: node.partition }
+          : { kind: 'design', workspace: node.workspace, id: node.design };
+      case 'partition':
+        // A partition's parent is the `levelGroup(partitions)` of the level that owns it: either
+        // the design root (parent is undefined) or another partition.
+        return { kind: 'levelGroup', workspace: node.workspace, design: node.design, group: 'partitions', partition: node.parent };
       case 'diagram':
         return { kind: 'levelGroup', workspace: node.workspace, design: node.design, partition: node.partition, group: 'diagrams' };
+      case 'table':
+        if (node.source === 'design') return { kind: 'levelGroup', workspace: node.workspace, design: node.id, partition: node.partition, group: 'tables' };
+        return { kind: 'db', workspace: node.workspace, design: node.design, id: node.id };
       default:
         return undefined;
     }
-  }
-
-  /** Numeric order, so `design10` comes after `design9` (creation order). */
-  private async groupIds(workspace: string, group: Group): Promise<string[]> {
-    const ws = this.storage.workspace(workspace);
-    const ids = await (group === 'design' ? ws.designIds() : ws.dbIds());
-    return ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   }
 
   dispose(): void {
@@ -397,10 +392,7 @@ export class WorkspaceTreeProvider implements vscode.TreeDataProvider<TreeNode>,
   }
 }
 
-function levelGroups(workspace: string, design: string, partition: string | undefined): TreeNode[] {
-  return (['tables', 'diagrams', 'partitions'] as LevelGroup[]).map((group) => ({ kind: 'levelGroup', workspace, design, partition, group }));
-}
-
+/** The "hidden" set keyed per (workspace, design) for fast lookup. */
 function foreignKeys(relations: { from: { table: string; columns: string[] } }[]): Map<string, Set<string>> {
   const fks = new Map<string, Set<string>>();
   for (const r of relations) {

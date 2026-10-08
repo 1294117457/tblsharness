@@ -2,7 +2,7 @@
   "name": "harness-cursor",
   "displayName": "Harness",
   "description": "以 tbls JSON 为统一格式，对照数据模型的设计与数据库的实际结构",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "harness",
   "private": true,
   "engines": {
@@ -226,6 +226,36 @@
         "command": "harness.db.delete",
         "title": "删除数据库",
         "category": "Harness"
+      },
+      {
+        "command": "harness.db.addToDesign",
+        "title": "把数据库加进设计画布",
+        "category": "Harness",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "harness.db.showOnCanvas",
+        "title": "把数据库表加到画布上",
+        "category": "Harness",
+        "icon": "$(diff-added)"
+      },
+      {
+        "command": "harness.table.toggleHidden",
+        "title": "显示/隐藏设计表",
+        "category": "Harness",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "harness.diagram.toggleHidden",
+        "title": "显示/隐藏设计图",
+        "category": "Harness",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "harness.dbTable.toggleHidden",
+        "title": "显示/隐藏数据库表",
+        "category": "Harness",
+        "icon": "$(eye)"
       },
       {
         "command": "harness.tbls.checkUpdate",
@@ -482,13 +512,38 @@
         },
         {
           "command": "harness.design.create",
-          "when": "view == harness.workspaces && viewItem == group.design",
-          "group": "inline"
+          "when": "view == harness.workspaces && viewItem =~ /^(levelGroup\\.db|levelGroup\\.partitions)$/",
+          "group": "inline@0"
         },
         {
-          "command": "harness.db.create",
-          "when": "view == harness.workspaces && viewItem == group.db",
-          "group": "inline"
+          "command": "harness.db.addToDesign",
+          "when": "view == harness.workspaces && viewItem == db",
+          "group": "inline@0"
+        },
+        {
+          "command": "harness.db.sync",
+          "when": "view == harness.workspaces && viewItem == db",
+          "group": "inline@1"
+        },
+        {
+          "command": "harness.db.showOnCanvas",
+          "when": "view == harness.workspaces && viewItem == table.db",
+          "group": "inline@0"
+        },
+        {
+          "command": "harness.dbTable.toggleHidden",
+          "when": "view == harness.workspaces && viewItem == table.db",
+          "group": "inline@1"
+        },
+        {
+          "command": "harness.table.toggleHidden",
+          "when": "view == harness.workspaces && viewItem == table.design",
+          "group": "inline@0"
+        },
+        {
+          "command": "harness.diagram.toggleHidden",
+          "when": "view == harness.workspaces && viewItem == diagram",
+          "group": "inline@0"
         },
         {
           "command": "harness.design.open",

@@ -108,13 +108,11 @@ export interface LevelDiagram {
   hidden: boolean;
 }
 
+/** What the source panel used to list for one level; the side panel takes over, so only the
+ * canvas-relevant slices are returned. */
 export interface LevelContent {
   tables: LevelTable[];
   diagrams: LevelDiagram[];
-  /** Database tables shown at this level, by source. */
-  db: Record<string, Set<string>>;
-  /** Database tables placed on other levels, by source. */
-  dbElsewhere: Record<string, Set<string>>;
 }
 
 export interface CanvasView {
@@ -132,14 +130,13 @@ export interface CanvasView {
 }
 
 /** What the source panel lists for one level. */
+/** What the source panel used to list for one level; the side panel takes over, so this is
+ * only the canvas-relevant slices now. The source panel used to also return `db` / `dbElsewhere`
+ * for the per-source `Set<string>`, but with that panel gone nobody reads them. */
 export function levelContent(view: CanvasView, level: string | undefined): LevelContent {
   const key = level ?? '';
   const own = view.levels.get(key);
-  const dbElsewhere: Record<string, Set<string>> = {};
-  for (const [src, placed] of Object.entries(view.dbPlaced)) {
-    for (const [table, at] of placed) if (at !== key) (dbElsewhere[src] ??= new Set()).add(table);
-  }
-  return { tables: own?.tables ?? [], diagrams: own?.diagrams ?? [], db: own?.db ?? {}, dbElsewhere };
+  return { tables: own?.tables ?? [], diagrams: own?.diagrams ?? [] };
 }
 
 export const TABLE_HANDLE = '__table';

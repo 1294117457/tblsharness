@@ -75,7 +75,6 @@ const levelInfo = computed(() => {
     namespace: ns && namespaceLabel(ns),
     tables: own?.tables.length ?? 0,
     diagrams: own?.diagrams.length ?? 0,
-    db: Object.values(own?.db ?? {}).reduce((n, s) => n + s.size, 0),
     partitions: canvas.value.partitions.filter((x) => x.parent === level).length,
   };
 });
@@ -279,7 +278,7 @@ function cardinalityLabel(c: TblsCardinality): string {
         当前层：新建和粘贴都放到这里<template v-if="levelInfo.namespace">，新表自动带上命名空间 <span class="ns">{{ levelInfo.namespace }}</span></template>。
       </p>
       <p class="muted">
-        {{ levelInfo.tables }} 张设计表 · {{ levelInfo.diagrams }} 张设计图 · {{ levelInfo.partitions }} 个子分区画布<template v-if="levelInfo.db"> · {{ levelInfo.db }} 张数据库表</template>
+        {{ levelInfo.tables }} 张设计表 · {{ levelInfo.diagrams }} 张设计图 · {{ levelInfo.partitions }} 个子分区画布
       </p>
       <div class="row-actions">
         <button :disabled="!state.sources[DESIGN_SOURCE]?.schema" @click="emit('create-table')">+ 新建表</button>
